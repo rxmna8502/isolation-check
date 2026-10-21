@@ -1,0 +1,34 @@
+name: Feature Request
+description: Propose a new feature, rule, or enhancement for isolation-check
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check existing issues and roadmap discussions before submitting.
+        Note: Core scope is currently focused on local development environments with Docker Compose and PostgreSQL.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear and concise description of the problem you are experiencing.
+      placeholder: "I encounter collisions when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution or Behavior
+      description: Describe what you want isolation-check to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative approaches or workarounds you have considered.
+    validations:
+      required: false

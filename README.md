@@ -1,202 +1,303 @@
 # isolation-check
 
-`isolation-check` is a local command-line tool that audits configuration between separate local development environments (e.g., Git worktrees) and flags accidental resource sharing—such as Docker volumes, databases, or host port bindings—before tests or migrations run. It also safely prepares isolated Git worktrees with generated Docker Compose environments and manages their local runtime lifecycle (`up`, `status`, `down`).
-
-> **Project Status (v0.2.0a1 - Milestone: Managed Runtime Lifecycle & Loopback Port Allocation):**
-> Design-stage open-source development tool (Package version: `0.2.0a1`, Manifest schema version: `1`).
-> - **Implemented:**
->   - Configuration auditing for Docker Compose named volumes (`VOL001`) and fixed IPv4 host-port bindings (`PORT001`).
->   - Safe Git worktree creation (`create`) with generated Compose overrides, dedicated PostgreSQL volume storage, loopback port binding policy, and versioned ownership manifests.
->   - Managed runtime lifecycle (`up`, `status`, `down`) with strict path and ownership verification, Compose capability detection, dynamic loopback port assignment (`127.0.0.1`), health inspection, stale state detection, and volume-preserving teardown.
-> - **Planned (Future Milestones):** Automated worktree discovery (`isolation-check discover`), database migrations, database seeding, cloning, and destructive environment teardown (`isolation-check destroy`).
->
-> **Safety Notice:** `isolation-check` operates on local Docker Compose projects and Git worktrees. It verifies declared named volume segregation, fixed IPv4 port bindings, and loopback application binding. Resources outside this coverage—such as arbitrary host bind mounts, external databases, shared host operating system files, and networks outside Compose—are not evaluated. Exit 0 indicates that evaluated resources passed verification, but does not guarantee absolute system isolation.
+`isolation-check` creates and verifies supported isolation boundaries for local Git worktree environments.
 
 ---
 
-## Command Reference: Implemented vs. Planned
+## The Problem
 
-| Command | Status | Purpose |
+Two separate Git worktrees can contain independent branch checkouts, but if they share Docker Compose configurations, they often accidentally share resources on the same host:
+
+```
+Worktree A (feature-payments)    ──┐
+                                   ├──> Named volume: "app_pgdata" (data collision!)
+Worktree B (feature-analytics)   ──┘    Host binding: "127.0.0.1:3000" (port conflict!)
+```
+
+Running tests or database migrations in Worktree A can silently overwrite or corrupt data used in Worktree B, or fail to start because host port `3000` is already in use. `isolation-check` detects these collisions before containers start and provides automated preparation of isolated worktrees with dedicated storage and dynamic loopback ports.
+
+---
+
+## Early Alpha Warning
+
+> [!WARNING]
+> **Project Status (v0.3.0a1 - Public Alpha Preview):**
+> `isolation-check` is in early alpha development. It is intended for testing and evaluation in local development environments.
+> - Current scope is strictly limited to tested configurations: local Linux, Docker Compose, PostgreSQL, and one explicitly configured application service.
+> - Destructive resource cleanup (`destroy`) is intentionally not implemented in this release to prevent accidental data loss.
+> - Exit code `0` indicates that all evaluated rules passed verification; it does not constitute a guarantee of universal system isolation.
+
+---
+
+## Supported Scope & Support Matrix
+
+The table below reflects capabilities verified by tests and active code in this release:
+
+| Capability / Component | Status | Details |
 |---|---|---|
-| `isolation-check check <left> <right>` | **Implemented** | Audit two Compose environments for volume (`VOL001`) and host-port (`PORT001`) collisions. |
-| `isolation-check create <name> --dry-run` | **Implemented** | Validate configuration, show proposed branch, worktree path, project name, volume, and configuration plan without making any disk or Git changes. |
-| `isolation-check create <name>` | **Implemented** | Safely create Git worktree, dedicated Compose project, dedicated PostgreSQL volume, loopback port policy, and versioned ownership manifest. |
-| `isolation-check up <name>` | **Implemented** | Verify ownership/capabilities, assign dynamic host loopback port, start managed Compose project with unexposed database, and record runtime state. |
-| `isolation-check status <name>` | **Implemented** | Read-only query of container states, health status (RUNNING vs HEALTHY), actual loopback URL, and stale runtime state detection. |
-| `isolation-check down <name>` | **Implemented** | Safely stop managed containers and network while strictly preserving PostgreSQL data volumes, worktrees, manifests, and private environment files. |
-| `isolation-check discover` | *Planned* | Machine-readable listing of local worktrees and Compose environments. |
-| `isolation-check destroy <name>` | *Planned* | Teardown and cleanup of managed resources including data volumes (not implemented in this milestone). |
+| **Linux (Host & Container Engine)** | **Supported / Tested** | Primary execution target tested with Docker Compose. |
+| **Docker Compose** | **Supported** | Requires Compose v2.20+ with support for `!override` and `!reset` YAML tags. |
+| **PostgreSQL** | **Supported** | Single PostgreSQL service per environment with dedicated volume mount. |
+| **Application Service** | **Supported** | Exactly one application service per environment with target container port (`app_port`). |
+| **Dynamic Host Port Allocation** | **Supported** | Loopback binding (`127.0.0.1`) assigned at runtime via Docker Compose override. |
+| **Non-Destructive Teardown (`down`)** | **Supported** | Stops containers/network; strictly preserves PostgreSQL volumes and worktree. |
+| **Multiple Databases in one project** | *Unsupported* | Not supported in this milestone. |
+| **Redis / MySQL / MongoDB** | *Unsupported* | Only PostgreSQL volume segregation is currently automated. |
+| **macOS** | *Experimental / Untested* | Untested in automated CI pipelines. |
+| **Native Windows** | *Experimental / Untested* | CLI tools execute, but primary deployment target is Linux Docker engines. |
+| **Destructive Teardown (`destroy`)** | *Not Implemented* | Data volumes are never automatically deleted in this release. |
 
 ---
 
-## Environment Configuration & Inputs
+## Installation
 
-Scope: **Local Linux, Docker Compose, PostgreSQL, and one explicitly configured application service.**
+### From Source or Wheel
+```bash
+# Clone the repository
+git clone https://github.com/rxmna8502/isolation-check.git
+cd isolation-check
 
-### Explicit Inputs Requirement
-To avoid guessing or inspecting arbitrary repository files, developers must explicitly identify:
-1. Source repository (`--repo`, defaults to current working directory) and base revision (`--base-ref`, defaults to `HEAD`).
-2. Compose files in declared merge order (`-f` / `--compose-file`).
-3. Application service name (`--app-service`).
-4. PostgreSQL service name (`--db-service`).
-5. Application database connection environment variable name (`--db-env-var`).
-6. Application container target port (`--app-port` or `app_port` in config). If omitted, inferred only when the effective Compose application service has exactly one unambiguous container port.
+# Install using pip (Python 3.11+ required)
+pip install .
+```
 
-These mappings can be supplied via CLI flags or a project `isolation-check.toml` configuration file:
+### Verify Installation
+```bash
+isolation-check --version
+# Expected output: isolation-check 0.3.0a1
+
+isolation-check --help
+```
+
+---
+
+## Five-Minute Quick Start
+
+A minimal ready-to-test setup is provided in [examples/postgres-app/](examples/postgres-app/).
+
+```bash
+# 1. Preview environment creation without modifying disk or Git
+isolation-check create feature-payments --dry-run
+
+# 2. Safely create two isolated environments
+isolation-check create feature-payments
+isolation-check create feature-analytics
+
+# 3. Check for resource collisions between both worktrees
+isolation-check check ../feature-payments ../feature-analytics
+
+# 4. Start the first environment
+isolation-check up feature-payments
+
+# 5. Query live status (read-only)
+isolation-check status feature-payments
+
+# 6. Stop containers while preserving database volume
+isolation-check down feature-payments
+```
+
+---
+
+## Configuration Reference (`isolation-check.toml`)
+
+To avoid guessing repository configuration, place `isolation-check.toml` in your repository root:
 
 ```toml
-# isolation-check.toml in repository root
 [create]
+# Compose files in declared merge order
 compose_files = ["docker-compose.yaml"]
+
+# Application service name as declared in Compose
 app_service = "web"
+
+# PostgreSQL database service name as declared in Compose
 db_service = "db"
+
+# Environment variable name where application expects the connection URL
 db_env_var = "DATABASE_URL"
+
+# Application container target port (e.g. 3000)
+# If omitted, inferred only if exactly one container port is declared
 app_port = 3000
+
+# Publish PostgreSQL to host (default: false, keeps db on internal network only)
 publish_db = false
 ```
 
-### Application Port & Host Binding Semantics
-- `app_port` designates the application container's target port (e.g. 3000), not the host port.
-- Host ports are **not permanently allocated at create time**. A host port that is free during environment creation may be occupied when the environment is started.
-- At `up` time, `isolation-check` dynamically assigns a host loopback port on `127.0.0.1` and verifies the actual binding through Docker/Compose state.
-- PostgreSQL remains completely unpublished on the host (`ports: !reset []`) unless `publish_db = true` was explicitly configured.
+All TOML settings can be overridden at the command line using flags (e.g. `--app-port 8080`, `--app-service api`).
 
 ---
 
-## How to Run
+## Command Reference & Examples
 
-### 1. Dry Run
-Validate inputs, check for unsupported configurations, and display the proposed plan without making any changes:
+### 1. `create` (Environment Preparation)
+Creates a new Git worktree, branch, dedicated PostgreSQL volume, and loopback port override:
 ```bash
-isolation-check create feature-payments --dry-run
+isolation-check create <environment-name> [--dry-run] [--app-port <port>]
 ```
+- Creates untracked directory `.isolation-check/` in the new worktree (automatically added to `.git/info/exclude`).
+- Writes `.isolation-check/compose.override.yaml` (mode `0600`).
+- Writes `.isolation-check/manifest.json` (ownership manifest with schema version 1).
+- Writes `.isolation-check/isolation.env` containing isolated database connection credentials.
+- **Does not pre-allocate a host port:** Port allocation is deferred to `up` time.
 
-### 2. Create Environment
-Create a new Git worktree with dedicated PostgreSQL storage and loopback port override:
+### 2. `check` (Configuration Audit)
+Compares two environments for declared resource collisions before starting containers:
 ```bash
-isolation-check create feature-payments
+isolation-check check <path1> <path2> [--format {text,json}] [--strict]
 ```
+- `VOL001`: Identifies shared mounted named volume collisions (`FAIL`, exit 1) and read-only sharing (`WARN`, exit 0).
+- `PORT001`: Identifies overlapping fixed IPv4 host port bindings (`FAIL`, exit 1).
+- `COVERAGE`: Flags unevaluated runtime state (`UNKNOWN`).
 
-Generated structure in the new worktree:
-```
-../feature-payments/
-├── .isolation-check/
-│   ├── compose.override.yaml   # Overrides project name, mounts dedicated volume, sets loopback port
-│   ├── isolation.env           # Private environment file (mode 0600)
-│   ├── manifest.json           # Versioned ownership manifest (schema version 1)
-│   └── runtime-state.json      # Transient runtime state written during 'up' (mode 0600)
-├── docker-compose.yaml         # Original tracked Compose file (untouched)
-└── ... (repository source files)
-```
-*(The `.isolation-check/` folder is automatically excluded in `.git/info/exclude` so it is never committed).*
-
-### 3. Start Environment (`up`)
-Verify ownership and start the managed Compose project:
+### 3. `up` (Start Managed Environment)
+Starts the Docker Compose project with loopback-only bindings:
 ```bash
-isolation-check up feature-payments
-# Or output machine-readable JSON:
-isolation-check up feature-payments --json
+isolation-check up <environment-name> [--json]
 ```
-- Binds application to a dynamic host port on `127.0.0.1`.
-- Outputs loopback URL (e.g. `http://127.0.0.1:10001`).
-- Distinguishes running from healthy (reports `UNKNOWN` health if no container healthcheck is defined).
-- Idempotent: if already active with matching configuration, reports current state without duplicating containers.
+- Validates repository record, worktree ownership manifest, and Git registration.
+- Probes Docker Compose for required `!override` and `!reset` capability support.
+- Dynamically assigns an available loopback port on `127.0.0.1` (retries on port bind collision).
+- Unpublishes PostgreSQL from the host (`ports: !reset []`) unless `publish_db = true`.
+- Writes transient runtime state to `.isolation-check/runtime-state.json` (mode `0600`).
+- Reports live loopback URL (e.g. `http://127.0.0.1:10001`).
+- Idempotent: If already running with matching configuration, reports state without duplicate starts.
 
-### 4. Query Status (`status`)
+### 4. `status` (Query Environment State)
 Read-only inspection of live container and health states:
 ```bash
-isolation-check status feature-payments
-# Or output machine-readable JSON:
-isolation-check status feature-payments --json
+isolation-check status <environment-name> [--json]
 ```
 - Reports states: `RUNNING`, `HEALTHY`, `UNHEALTHY`, `STOPPED`, `PARTIAL`, `UNKNOWN`.
-- Verifies container labels match the expected Compose project.
-- Detects stale `runtime-state.json` (e.g., if containers stopped externally, suppresses stale URLs and flags stale state).
+- Distinguishes running from healthy (reports `UNKNOWN` health if no healthcheck is configured).
+- Validates container labels (`com.docker.compose.project`) and refuses foreign containers.
+- Detects stale `runtime-state.json` if containers stopped externally.
 
-### 5. Stop Environment (`down`)
-Safely stop containers while preserving database storage:
+### 5. `down` (Safe Teardown)
+Stops containers and removes the project network while preserving data:
 ```bash
-isolation-check down feature-payments
+isolation-check down <environment-name> [--json]
 ```
-- Stops containers and removes the project network.
-- **Never removes volumes:** Dedicated PostgreSQL volume, worktree, branch, manifests, and credentials are preserved.
+- Stops project containers via `docker compose down` strictly without `-v` or `--volumes`.
+- Preserves PostgreSQL data volume, worktree, branch, manifests, and private environment files.
 - Destructive flags (`-v`, `--volumes`) are refused.
 - Safely repeatable when already stopped.
 
-### 6. Compare Environments (`check`)
-Audit configuration sharing between two worktrees or Compose projects:
-```bash
-isolation-check check ../feature-a ../feature-b
-```
-Outputs findings for:
-- `VOL001`: Shared writable named volume collisions (`FAIL`, exit 1) or read-only sharing (`WARN`, exit 0).
-- `PORT001`: Overlapping fixed IPv4 host port bindings (`FAIL`, exit 1).
-- `COVERAGE`: Disclaimer noting unevaluated runtime state.
+---
+
+## Safety Model & Guardrails
+
+`isolation-check` is built around conservative execution rules:
+
+1. **Subprocess Argument Arrays:** Commands are executed as argument arrays (`["docker", "compose", ...]`), never via shell interpolation (`shell=True`).
+2. **Sanitized Environment:** Subprocesses run with a filtered, sanitized environment (`_build_safe_env()`) preventing accidental credential propagation.
+3. **Bounded Capture & Timeouts:** All subprocess calls enforce bounded stdout/stderr capture (default 1MB) and explicit execution timeouts.
+4. **Git Hook Isolation:** All tool-managed Git operations pass `-c core.hooksPath=/dev/null` to prevent repository hooks from running unexpectedly.
+5. **No Tracked File Modification:** Tracked repository files, base Compose files, and `.env` files are never edited or overwritten.
+6. **Path Boundary Validation:** Manifest paths, override paths, and base Compose files are checked against canonical worktree boundaries. Path traversal (`..`) and symlink escapes outside the worktree are strictly rejected.
+7. **Secret Redaction:** Passwords and tokens never appear in terminal output, error messages, or JSON reports.
+8. **Restrictive File Modes:** Credentials and runtime state are written with restrictive permissions (`mode 0600`).
 
 ---
 
-## Verified Resources vs. Out of Scope
+## What the Tool Never Does Automatically
 
-| Resource Type | Status | Details |
-|---|---|---|
-| Named Docker Volumes | **Verified** | Evaluated by `VOL001` and isolated via dedicated volume per environment during `create`. |
-| Host Port Bindings | **Verified** | Fixed IPv4 host port collisions evaluated by `PORT001`. Managed environments bound to loopback `127.0.0.1`. |
-| Database Storage | **Verified** | PostgreSQL data volume segregated per environment; database unpublished from host by default. |
-| Bind Mounts | *Outside Coverage* | Host directory bind mounts are not checked for overlapping filesystem paths. |
-| Database Schemas | *Outside Coverage* | Internal database schema state and migrations are not managed or evaluated. |
-| Host OS Files & Sockets | *Outside Coverage* | Filesystem paths outside the worktree boundary are not scanned for shared locks or sockets. |
-
----
-
-## Exit Codes
-
-| Exit Code | Meaning |
-|---|---|
-| `0` | Scan or lifecycle operation completed successfully without failure. |
-| `1` | A configured sharing collision was found (`check` found at least one `FAIL`) or runtime startup failed. |
-| `2` | Invalid input, ownership validation failure, unsupported Compose capability, or strict-mode `UNKNOWN`. |
+To avoid dangerous side effects, `isolation-check` will **never**:
+- Execute destructive volume deletions or pass `--volumes` to Docker Compose.
+- Run database migrations, seeding scripts, or arbitrary repository setup scripts.
+- Execute arbitrary commands inside user containers.
+- Connect to or probe external network databases.
+- Bind host sockets permanently at environment creation time.
+- Modify global Git configuration or bypass Git worktree verification.
 
 ---
 
-## Architecture & Code Structure
+## Finding Statuses & Exit Codes
 
-```
-src/isolation_check/
-├── cli.py              # CLI argument parser and command router (check, create, up, status, down)
-├── models.py           # Dataclasses: EngineScope, HostScope, VolumeMount, PortBinding, Finding, Report
-├── version.py          # Authoritative package version helper and manifest schema version
-├── collect/
-│   └── compose.py      # Subprocess execution of docker compose config with bounded I/O and sanitized env
-├── normalize/
-│   └── compose.py      # Pure mapping from Compose JSON to NormalizedEnvironment
-├── rules/
-│   ├── volumes.py      # Pairwise rule VOL001 evaluation
-│   └── ports.py        # Pairwise rule PORT001 evaluation (fixed IPv4, wildcards, protocols)
-├── report.py           # Text and versioned JSON report renderers
-├── create/
-│   ├── spec.py         # Explicit CreateSpec definition, app_port parsing, and TOML loader
-│   ├── validate.py     # Pre-flight validation, app_port inference, and unsupported arrangement refusal
-│   ├── worktree.py     # Safe Git worktree operations with disabled hooks (core.hooksPath=/dev/null)
-│   ├── generator.py    # Generates override Compose YAML, private env file, and manifest
-│   ├── verify.py       # Post-generation Compose verification of merged model
-│   └── manager.py      # Create workflow orchestrator with rollback tracking and work preservation
-└── runtime/
-    ├── capabilities.py # Probes Docker Compose version for !override and !reset support
-    ├── validation.py   # Strict ownership, worktree registration, and path boundary verification
-    ├── port_allocator.py# Dynamic candidate loopback port allocation with conflict detection
-    └── lifecycle.py    # Subcommand implementations for up, status, and non-destructive down
-```
+### Rule Findings
+- `PASS`: No supported resource collision was detected for the evaluated rule.
+- `WARN`: Review recommended (e.g. read-only volume sharing).
+- `FAIL`: A configured resource collision was detected (e.g. shared writable volume or port conflict).
+- `UNKNOWN`: The condition could not be evaluated (e.g. unevaluated bind mounts or runtime state).
+
+### Exit Codes
+- `0`: Scan or lifecycle operation completed successfully without failure.
+- `1`: Configured collision detected (`FAIL`) or runtime startup failure.
+- `2`: Validation failure, missing inputs, unsupported Compose capability, or strict-mode `UNKNOWN`.
 
 ---
 
-## Test Suite
+## Troubleshooting Guide
 
-Run all unit and integration tests:
-```bash
-python -m unittest discover -s tests -v
-```
+### 1. Docker Unavailable
+- **Message:** `The 'docker' executable was not found on PATH.`
+- **Cause:** Docker CLI is not installed or not available in the current environment PATH.
+- **Fix:** Install Docker and ensure `docker` and `docker compose` can be executed from your terminal.
 
-The test suite cleanly separates:
-- **Unit tests with mocks:** CLI parsing, app_port inference/validation, compose override generation, rules, reports, ownership validation, and runtime lifecycle states (up, status, down).
-- **Git integration tests:** Real disposable Git repository worktree creation, manifest tracking, and Compose rendering verification.
-- **Docker lifecycle smoke test:** Disposable two-environment simultaneous run verifying loopback ports, unexposed PostgreSQL, and volume preservation (executes when local Docker daemon is reachable; cleanly skips when daemon is offline).
+### 2. Unsupported Compose Version
+- **Message:** `Docker Compose Capability Error: Installed Docker Compose version does not support required YAML tags (!override, !reset).`
+- **Cause:** Docker Compose version is older than v2.20.
+- **Fix:** Upgrade Docker Compose to v2.20 or newer (`docker compose version`).
+
+### 3. Existing Branch or Worktree Destination
+- **Message:** `Destination worktree path already exists` or `Branch already exists in repository`.
+- **Cause:** An environment with the same name was already created or the Git branch exists.
+- **Fix:** Choose a different environment name or manually clean up the previous worktree (`git worktree remove <path>` and `git branch -d <branch>`).
+
+### 4. Multiple Candidate Container Ports
+- **Message:** `Application service 'web' exposes multiple candidate container ports (...). Please explicitly configure 'app_port'.`
+- **Cause:** The application service defines more than one port and `isolation-check` cannot safely guess developer intent.
+- **Fix:** Add `app_port = <port>` in `isolation-check.toml` or pass `--app-port <port>`.
+
+### 5. Fixed Container Names
+- **Message:** `Service 'web' specifies fixed container_name '...'. Fixed container names cause collisions.`
+- **Cause:** Base Compose file hardcodes `container_name`, which prevents running parallel environments.
+- **Fix:** Remove `container_name` from your base Compose file to allow Docker Compose to generate project-scoped container names.
+
+### 6. External Networks or Volumes
+- **Message:** `Volume '...' uses custom storage driver` or `Network is declared as external`.
+- **Cause:** External or custom network/storage drivers cannot be safely replicated across worktrees.
+- **Fix:** Use standard Docker Compose named volumes and project-scoped networks.
+
+### 7. Stale Runtime State
+- **Message:** `Notice: Stored runtime state is STALE (containers have stopped).`
+- **Cause:** Containers were stopped externally (e.g. via `docker stop` or system reboot).
+- **Fix:** Run `isolation-check up <environment>` to start containers fresh, or `isolation-check down <environment>` to clean up the stopped state.
+
+### 8. Environment Already Running
+- **Message:** `isolation-check up -- ENVIRONMENT RUNNING (ALREADY ACTIVE)`
+- **Behavior:** `up` is idempotent. It verifies container ownership and reports the existing active URL without duplicate startup.
+
+### 9. Startup Failure & Preservation
+- **Message:** `Failed to start environment: ... The environment and generated files have been preserved.`
+- **Behavior:** Generated files and worktrees are preserved so you can diagnose the issue (`cd <worktree> && docker compose logs`).
+
+---
+
+## Known Limitations
+
+- **Single Application Service:** Multi-service architectures where multiple distinct services require host port mapping are not yet supported.
+- **PostgreSQL Only:** Automated dedicated volume segregation is currently implemented for PostgreSQL.
+- **Bind Mounts:** Host filesystem directory mounts (`./src:/app`) are outside collision detection coverage.
+- **Destructive Destroy:** Automated cleanup of dedicated database volumes (`destroy`) is planned for a future milestone.
+
+---
+
+## Development Setup
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full instructions on setting up a local development environment, running tests, and submitting changes.
+
+---
+
+## Community & Security
+
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Security Reporting:** [SECURITY.md](SECURITY.md)
+- **Support & Help:** [SUPPORT.md](SUPPORT.md)
+- **Code of Conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+
+---
+
+## License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE).

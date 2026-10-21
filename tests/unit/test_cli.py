@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from isolation_check import cli
+from isolation_check.version import get_package_version
 
 FIXTURES_JSON = Path(__file__).parent.parent / "fixtures" / "json"
 
@@ -166,7 +167,17 @@ class TestCLI(unittest.TestCase):
             destructive=True,
         )
 
+    def test_cli_version_flag(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["--version"])
+            self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("isolation-check", out.getvalue())
+        self.assertIn(get_package_version(), out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

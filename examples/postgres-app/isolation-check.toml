@@ -1,0 +1,8 @@
+# isolation-check configuration for minimal PostgreSQL application
+[create]
+compose_files = ["docker-compose.yaml"]
+app_service = "web"
+db_service = "db"
+db_env_var = "DATABASE_URL"
+app_port = 3000
+publish_db = false

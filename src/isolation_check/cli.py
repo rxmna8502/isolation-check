@@ -33,6 +33,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         prog="isolation-check",
         description="Inspect and prepare isolated local development environments.",
     )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {get_package_version()}",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 

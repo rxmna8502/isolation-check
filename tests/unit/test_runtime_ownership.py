@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from isolation_check.runtime.lifecycle import _inspect_compose_containers
 from isolation_check.runtime.validation import OwnershipError, locate_and_validate_environment
+from isolation_check.version import get_package_version
 
 
 class TestRuntimeOwnershipValidation(unittest.TestCase):
@@ -30,7 +31,7 @@ class TestRuntimeOwnershipValidation(unittest.TestCase):
         self.manifest_file = self.wt / ".isolation-check" / "manifest.json"
         self.manifest_data = {
             "tool": "isolation-check",
-            "tool_version": "0.2.0a1",
+            "tool_version": get_package_version(),
             "manifest_schema_version": 1,
             "environment": {"name": "feature-x"},
             "compose": {

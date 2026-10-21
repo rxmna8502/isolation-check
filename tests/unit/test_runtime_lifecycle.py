@@ -12,6 +12,7 @@ from isolation_check.runtime.lifecycle import (
     execute_status,
     execute_up,
 )
+from isolation_check.version import get_package_version
 
 
 class TestRuntimeLifecycle(unittest.TestCase):
@@ -38,7 +39,7 @@ class TestRuntimeLifecycle(unittest.TestCase):
         self.manifest_file = self.wt / ".isolation-check" / "manifest.json"
         self.manifest_data = {
             "tool": "isolation-check",
-            "tool_version": "0.2.0a1",
+            "tool_version": get_package_version(),
             "manifest_schema_version": 1,
             "environment": {"name": "feature-x"},
             "compose": {

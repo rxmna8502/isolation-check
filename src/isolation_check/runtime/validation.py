@@ -28,6 +28,7 @@ def _resolve_repo_root(hint_path: Path | None = None) -> Path:
             capture_output=True,
             text=True,
             env=_build_safe_env(),
+            timeout=10.0,
             check=False,
         )
         if proc.returncode == 0:
@@ -48,6 +49,7 @@ def _resolve_repo_root(hint_path: Path | None = None) -> Path:
             capture_output=True,
             text=True,
             env=_build_safe_env(),
+            timeout=10.0,
             check=False,
         )
         if proc.returncode == 0:
@@ -74,6 +76,7 @@ def _get_registered_git_worktrees(repo_root: Path) -> list[Path]:
             capture_output=True,
             text=True,
             env=_build_safe_env(),
+            timeout=15.0,
             check=False,
         )
         if proc.returncode != 0:

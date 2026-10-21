@@ -4,26 +4,56 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "isolation-check"
-version = "0.2.0a1"
-description = "Inspect configured resource sharing between local development environments"
+version = "0.3.0a1"
+description = "Creates and verifies supported isolation boundaries for local Git worktree development environments."
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 authors = [
     { name = "isolation-check contributors" }
 ]
+keywords = [
+    "docker-compose",
+    "git-worktrees",
+    "isolation",
+    "testing",
+    "local-development",
+    "postgresql",
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
     "Operating System :: OS Independent",
     "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0.0",
+    "twine>=4.0.0",
 ]
 
 [project.scripts]
 isolation-check = "isolation_check.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/rxmna8502/isolation-check"
+Repository = "https://github.com/rxmna8502/isolation-check.git"
+Issues = "https://github.com/rxmna8502/isolation-check/issues"
+Changelog = "https://github.com/rxmna8502/isolation-check/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/rxmna8502/isolation-check#readme"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+isolation_check = ["py.typed"]

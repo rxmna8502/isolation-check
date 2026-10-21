@@ -4,7 +4,26 @@ All notable changes to `isolation-check` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.2.0a1] - Unreleased (Development Milestone: Managed Runtime Lifecycle)
+## [0.3.0a1] - Unreleased (Public Alpha Release Readiness)
+
+### Added
+- Standard `--version` (`-V`) CLI flag displaying authoritative package version.
+- Python packaging infrastructure in `pyproject.toml` adhering to PEP 621 / PEP 517 / PEP 440 with build backend setuptools.
+- `MANIFEST.in` and `py.typed` marker for PEP 561 compliance.
+- Complete open-source project documents:
+  - `LICENSE` (Apache-2.0)
+  - `CONTRIBUTING.md` with development setup, coding guidelines, and PR workflow
+  - `SECURITY.md` with private vulnerability reporting and secret-redaction requirements
+  - `CODE_OF_CONDUCT.md` (Contributor Covenant v2.1)
+  - `SUPPORT.md` with issue guidance and links
+- Verified minimal working example under `examples/postgres-app/`.
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Linux builds, matrix tests, and clean wheel installation.
+- GitHub Actions release workflow (`.github/workflows/release.yml`) with PyPI Trusted Publishing preparation.
+- Issue and PR templates (`.github/ISSUE_TEMPLATE/bug_report.yml`, `feature_request.yml`, `pull_request_template.md`).
+- Coding agent integration guide (`docs/agent-integration.md`).
+- Comprehensive support matrix and troubleshooting guide in `README.md`.
+
+## [0.2.0a1] - Previous Development Milestone (Managed Runtime Lifecycle)
 
 ### Added
 - Managed runtime lifecycle CLI subcommands:
@@ -23,12 +42,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Read-only status inspection distinguishing `RUNNING` from `HEALTHY` (`UNKNOWN` health when no healthcheck exists).
 - Detection of stale `runtime-state.json` when containers are stopped externally.
 - Volume-preserving teardown in `down` (refusal of `-v`/`--volumes` flags).
-- Authoritative package version helper in `src/isolation_check/version.py` (`0.2.0a1`) decoupled from manifest schema version (`1`).
+- Authoritative package version helper in `src/isolation_check/version.py` decoupled from manifest schema version (`1`).
 
 ### Changed
-- Compose override generation now unpublishes PostgreSQL (`ports: !reset []`) unless `publish_db: true` is explicitly enabled.
+- Compose override generation unpublishes PostgreSQL (`ports: !reset []`) unless `publish_db: true` is explicitly enabled.
 - Application port is published only to `127.0.0.1` using `ports: !override`.
-- Documentation updated to replace planned `start` with implemented `up`, `status`, and `down`.
 
 ## [0.1.0a3] - Previous Development Milestone (Worktree Creation)
 

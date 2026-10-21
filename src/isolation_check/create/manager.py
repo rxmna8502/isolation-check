@@ -21,6 +21,11 @@ from isolation_check.create.worktree import (
     remove_worktree,
     resolve_commit_hash,
 )
+from isolation_check.runtime.concurrency import (
+    ConcurrencyLockError,
+    acquire_environment_lock,
+    atomic_write_text,
+)
 from isolation_check.version import get_package_version
 
 
@@ -53,7 +58,7 @@ def register_managed_environment(
         "override_file": plan.override_compose_rel_path,
         "env_file": plan.env_rel_path,
     }
-    rec_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(rec_file, json.dumps(data, indent=2))
     return rec_file
 
 
@@ -179,75 +184,91 @@ def execute_create(spec: CreateSpec) -> int:
             sys.stderr.write(f"Validation Error: {exc}\n")
         return 2
 
-    # 2. Resource tracking for safe failure recovery
+    # 2. Concurrency lock and resource tracking for safe failure recovery
     created_resources: list[tuple[str, Any]] = []
+    env_dir = _get_managed_environments_dir(spec.repo)
+    lock_file = env_dir / f".{spec.name}.create.lock"
 
     try:
-        # Step A: Create worktree
-        create_worktree(spec.repo, spec.branch, spec.worktree_path, spec.base_ref)
-        created_resources.append(("worktree", spec.worktree_path))
-        created_resources.append(("branch", spec.branch))
+        with acquire_environment_lock(lock_file, spec.name, "create"):
+            try:
+                # Step A: Create worktree
+                create_worktree(spec.repo, spec.branch, spec.worktree_path, spec.base_ref)
+                created_resources.append(("worktree", spec.worktree_path))
+                created_resources.append(("branch", spec.branch))
 
-        # Step B: Exclude .isolation-check from git tracking in worktree
-        exclude_in_worktree(spec.worktree_path, ".isolation-check/")
+                # Step B: Exclude .isolation-check from git tracking in worktree
+                exclude_in_worktree(spec.worktree_path, ".isolation-check/")
 
-        # Step C: Write generated environment files
-        created_files = write_generated_environment_files(spec, plan, raw_compose, base_commit)
-        for f in created_files:
-            created_resources.append(("file", f))
+                # Step C: Write generated environment files
+                created_files = write_generated_environment_files(spec, plan, raw_compose, base_commit)
+                for f in created_files:
+                    created_resources.append(("file", f))
 
-        # Step D: Verify merged Compose model
-        from isolation_check.create.verify import verify_generated_environment
-        verify_generated_environment(spec, plan)
+                # Step D: Verify merged Compose model
+                from isolation_check.create.verify import verify_generated_environment
+                verify_generated_environment(spec, plan)
 
-        # Step E: Register managed environment record in repo
-        rec_file = register_managed_environment(spec, plan, base_commit)
-        created_resources.append(("record", rec_file))
+                # Step E: Register managed environment record in repo
+                rec_file = register_managed_environment(spec, plan, base_commit)
+                created_resources.append(("record", rec_file))
 
-    except Exception as exc:
-        # Error handling with change-preservation guardrails
-        err_msg = str(exc)
+            except Exception as exc:
+                # Error handling with change-preservation guardrails
+                err_msg = str(exc)
 
-        # Check if worktree acquired user changes
-        user_changes = has_uncommitted_changes(spec.worktree_path)
-        if user_changes:
-            # Never delete user work!
-            sys.stderr.write(f"\nError: Environment creation failed: {err_msg}\n")
-            sys.stderr.write(
-                "SAFETY WARNING: Worktree was PRESERVED because uncommitted user changes were detected.\n"
-                f"  Worktree path: {spec.worktree_path}\n"
-                f"  Branch:        {spec.branch}\n"
-                "Safe Recovery Steps:\n"
-                f"  1. Inspect worktree: cd {spec.worktree_path}\n"
-                f"  2. If safe to discard: git worktree remove --force {spec.worktree_path} && git branch -D {spec.branch}\n"
-            )
+                # Check if worktree acquired user changes
+                user_changes = has_uncommitted_changes(spec.worktree_path)
+                if user_changes:
+                    # Never delete user work!
+                    sys.stderr.write(f"\nError: Environment creation failed: {err_msg}\n")
+                    sys.stderr.write(
+                        "SAFETY WARNING: Worktree was PRESERVED because uncommitted user changes were detected.\n"
+                        f"  Worktree path: {spec.worktree_path}\n"
+                        f"  Branch:        {spec.branch}\n"
+                        "Safe Recovery Steps:\n"
+                        f"  1. Inspect worktree: cd {spec.worktree_path}\n"
+                        f"  2. If safe to discard: git worktree remove --force {spec.worktree_path} && git branch -D {spec.branch}\n"
+                    )
+                else:
+                    # Clean rollback of untracked resources created during this invocation
+                    for res_type, res_val in reversed(created_resources):
+                        try:
+                            if res_type == "file" and isinstance(res_val, Path) and res_val.is_file():
+                                res_val.unlink()
+                            elif res_type == "record" and isinstance(res_val, Path) and res_val.is_file():
+                                res_val.unlink()
+                            elif res_type == "worktree" and isinstance(res_val, Path):
+                                remove_worktree(spec.repo, res_val, force=True)
+                            elif res_type == "branch" and isinstance(res_val, str):
+                                delete_branch(spec.repo, res_val, force=True)
+                        except Exception:
+                            pass
+
+                    if spec.format == "json":
+                        print(json.dumps({
+                            "schema_version": "1.0",
+                            "tool_version": get_package_version(),
+                            "success": False,
+                            "error": err_msg,
+                            "rolled_back": True,
+                        }, indent=2))
+                    else:
+                        sys.stderr.write(f"Error: Environment creation failed: {err_msg}\n")
+                        sys.stderr.write("Partially created resources were safely cleaned up.\n")
+
+                return 2
+
+    except ConcurrencyLockError as exc:
+        if spec.format == "json":
+            print(json.dumps({
+                "schema_version": "1.0",
+                "tool_version": get_package_version(),
+                "success": False,
+                "error": str(exc),
+            }, indent=2))
         else:
-            # Clean rollback of untracked resources created during this invocation
-            for res_type, res_val in reversed(created_resources):
-                try:
-                    if res_type == "file" and isinstance(res_val, Path) and res_val.is_file():
-                        res_val.unlink()
-                    elif res_type == "record" and isinstance(res_val, Path) and res_val.is_file():
-                        res_val.unlink()
-                    elif res_type == "worktree" and isinstance(res_val, Path):
-                        remove_worktree(spec.repo, res_val, force=True)
-                    elif res_type == "branch" and isinstance(res_val, str):
-                        delete_branch(spec.repo, res_val, force=True)
-                except Exception:
-                    pass
-
-            if spec.format == "json":
-                print(json.dumps({
-                    "schema_version": "1.0",
-                    "tool_version": get_package_version(),
-                    "success": False,
-                    "error": err_msg,
-                    "rolled_back": True,
-                }, indent=2))
-            else:
-                sys.stderr.write(f"Error: Environment creation failed: {err_msg}\n")
-                sys.stderr.write("Partially created resources were safely cleaned up.\n")
-
+            sys.stderr.write(f"Concurrency Error: {exc}\n")
         return 2
 
     # 3. Successful creation output

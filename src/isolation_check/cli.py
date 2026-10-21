@@ -199,6 +199,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     down_parser = subparsers.add_parser(
         "down",
         help="Stop a managed environment while preserving data volumes.",
+        description="Stop a managed environment while preserving data volumes.",
     )
     down_parser.add_argument(
         "environment",
@@ -213,13 +214,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         dest="output_json",
         help="Output result as structured JSON.",
-    )
-    down_parser.add_argument(
-        "-v",
-        "--volumes",
-        action="store_true",
-        dest="destructive_volumes",
-        help="Refused: destructive volume deletion is not supported in down.",
     )
 
     return parser.parse_args(raw_args)
@@ -275,7 +269,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             env_name=args.environment,
             repo_hint=args.repo,
             output_json=getattr(args, "output_json", False),
-            destructive=getattr(args, "destructive_volumes", False),
         )
 
     if args.command == "create":

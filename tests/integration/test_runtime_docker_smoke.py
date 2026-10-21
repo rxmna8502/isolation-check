@@ -19,6 +19,8 @@ from isolation_check.runtime.lifecycle import execute_down, execute_status, exec
 
 def _is_docker_daemon_running() -> bool:
     """Checks whether the local Docker daemon is running and reachable."""
+    if os.environ.get("SKIP_DOCKER_SMOKE"):
+        return False
     try:
         proc = subprocess.run(
             ["docker", "info"],
@@ -41,8 +43,9 @@ services:
     expose:
       - "3000"
   db:
-    image: alpine:latest
-    command: ["sh", "-c", "sleep 3600"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secretpassword
     ports:
       - "5432:5432"
     volumes:

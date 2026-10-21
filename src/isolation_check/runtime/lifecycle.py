@@ -12,6 +12,11 @@ from typing import Any
 
 from isolation_check.collect.compose import _build_safe_env
 from isolation_check.runtime.capabilities import ComposeCapabilityError, verify_compose_capabilities
+from isolation_check.runtime.concurrency import (
+    ConcurrencyLockError,
+    acquire_environment_lock,
+    atomic_write_text,
+)
 from isolation_check.runtime.port_allocator import (
     allocate_candidate_loopback_port,
     is_port_binding_conflict,
@@ -253,11 +258,8 @@ def _render_and_write_override(
         "",
     ])
 
-    override_file.write_text("\n".join(lines), encoding="utf-8")
-    try:
-        os.chmod(override_file, 0o600)
-    except OSError:
-        pass
+    override_file = worktree_path / override_rel_path
+    atomic_write_text(override_file, "\n".join(lines), mode=0o600)
     return override_file
 
 
@@ -267,11 +269,7 @@ def _write_runtime_state(
 ) -> Path:
     """Writes transient runtime state with restrictive file permissions."""
     state_file = worktree_path / ".isolation-check" / "runtime-state.json"
-    state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    try:
-        os.chmod(state_file, 0o600)
-    except OSError:
-        pass
+    atomic_write_text(state_file, json.dumps(data, indent=2), mode=0o600)
     return state_file
 
 
@@ -343,35 +341,155 @@ def execute_up(
                 database_url = line.split("=", 1)[1]
                 break
 
-    # 3. Idempotency check: see if project is already running
+    lock_path = worktree_path / ".isolation-check" / "lifecycle.lock"
     try:
-        existing_containers = _inspect_compose_containers(
-            worktree_path, project_name, base_compose_files, override_rel_path
-        )
-    except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({"success": False, "error": str(exc)}, indent=2))
-        else:
-            sys.stderr.write(f"Security Error: {exc}\n")
-        return 2
+        with acquire_environment_lock(lock_path, env_name, "up"):
+            # 3. Idempotency check: see if project is already running
+            try:
+                existing_containers = _inspect_compose_containers(
+                    worktree_path, project_name, base_compose_files, override_rel_path
+                )
+            except OwnershipError as exc:
+                if output_json:
+                    print(json.dumps({"success": False, "error": str(exc)}, indent=2))
+                else:
+                    sys.stderr.write(f"Security Error: {exc}\n")
+                return 2
 
-    overall_state, overall_health = _evaluate_overall_status(existing_containers)
-    if overall_state == "RUNNING":
-        pub_port, pub_url = _extract_app_published_port(existing_containers, app_service, app_port)
-        if output_json:
-            print(json.dumps({
+            overall_state, overall_health = _evaluate_overall_status(existing_containers)
+            if overall_state == "RUNNING":
+                pub_port, pub_url = _extract_app_published_port(existing_containers, app_service, app_port)
+                if output_json:
+                    print(json.dumps({
+                        "schema_version": "1.0",
+                        "tool_version": get_package_version(),
+                        "success": True,
+                        "environment": env_name,
+                        "compose_project": project_name,
+                        "worktree_path": str(worktree_path),
+                        "status": "RUNNING",
+                        "health": overall_health,
+                        "app_port": app_port,
+                        "host_port": pub_port,
+                        "url": pub_url,
+                        "already_running": True,
+                        "containers": [
+                            {
+                                "name": c.get("Name"),
+                                "service": c.get("Service"),
+                                "state": c.get("State"),
+                                "health": _evaluate_container_health(c),
+                            }
+                            for c in existing_containers
+                        ],
+                    }, indent=2))
+                else:
+                    print("========================================================================")
+                    print("isolation-check up -- ENVIRONMENT RUNNING (ALREADY ACTIVE)")
+                    print(f"Environment: {env_name}")
+                    print(f"Project:     {project_name}")
+                    print(f"Worktree:    {worktree_path}")
+                    if pub_url:
+                        print(f"Application URL: {pub_url} (Loopback 127.0.0.1:{pub_port} -> container :{app_port})")
+                    print(f"State:       RUNNING")
+                    print(f"Health:      {overall_health}")
+                    print("========================================================================")
+                return 0
+
+            # 4. Port allocation with bounded retry for check-to-bind race conflicts
+            attempt = 0
+            excluded_candidates: list[int] = []
+            last_error = ""
+
+            while attempt < MAX_PORT_START_RETRIES:
+                attempt += 1
+                candidate_host_port = allocate_candidate_loopback_port(
+                    repo_root, exclude_ports=excluded_candidates
+                )
+                excluded_candidates.append(candidate_host_port)
+
+                # Re-render effective Compose override before startup
+                _render_and_write_override(
+                    worktree_path=worktree_path,
+                    override_rel_path=override_rel_path,
+                    project_name=project_name,
+                    db_service=db_service,
+                    dedicated_volume=dedicated_volume,
+                    publish_db=publish_db,
+                    app_service=app_service,
+                    app_port=app_port,
+                    host_port=candidate_host_port,
+                    db_env_var=db_env_var,
+                    database_url=database_url,
+                )
+
+                # Build Compose up command
+                cmd = [
+                    "docker",
+                    "compose",
+                    "-p",
+                    project_name,
+                    "--project-directory",
+                    str(worktree_path),
+                ]
+                for bf in base_compose_files:
+                    cmd.extend(["-f", str(worktree_path / bf)])
+                cmd.extend(["-f", str(worktree_path / override_rel_path)])
+                cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
+                cmd.extend(["up", "-d"])
+
+                code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
+                if code == 0:
+                    # Startup succeeded!
+                    break
+
+                last_error = stderr.strip() or stdout.strip() or f"Exited with code {code}"
+                # Retry only if error is a host-port binding conflict
+                if is_port_binding_conflict(last_error) and attempt < MAX_PORT_START_RETRIES:
+                    continue
+                else:
+                    # Non-port error or exceeded retries: preserve environment and report failure
+                    if output_json:
+                        print(json.dumps({
+                            "schema_version": "1.0",
+                            "tool_version": get_package_version(),
+                            "success": False,
+                            "environment": env_name,
+                            "compose_project": project_name,
+                            "error": last_error,
+                            "preserved_worktree": str(worktree_path),
+                        }, indent=2))
+                    else:
+                        sys.stderr.write(f"\nError: Failed to start environment '{env_name}': {last_error}\n")
+                        sys.stderr.write(
+                            f"The environment and generated files at {worktree_path} have been preserved.\n"
+                            f"To inspect or diagnose: cd {worktree_path} && docker compose ps\n"
+                        )
+                    return 1
+
+            # 5. Inspect Docker state post-startup
+            post_containers = _inspect_compose_containers(
+                worktree_path, project_name, base_compose_files, override_rel_path
+            )
+            overall_state, overall_health = _evaluate_overall_status(post_containers)
+            actual_port, app_url = _extract_app_published_port(post_containers, app_service, app_port)
+            if not actual_port:
+                actual_port = candidate_host_port
+                app_url = f"http://127.0.0.1:{actual_port}"
+
+            # 6. Write transient runtime state with restrictive permissions
+            runtime_data = {
                 "schema_version": "1.0",
                 "tool_version": get_package_version(),
-                "success": True,
                 "environment": env_name,
                 "compose_project": project_name,
-                "worktree_path": str(worktree_path),
-                "status": "RUNNING",
+                "status": overall_state,
                 "health": overall_health,
+                "app_service": app_service,
                 "app_port": app_port,
-                "host_port": pub_port,
-                "url": pub_url,
-                "already_running": True,
+                "host_port": actual_port,
+                "url": app_url,
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "containers": [
                     {
                         "name": c.get("Name"),
@@ -379,165 +497,60 @@ def execute_up(
                         "state": c.get("State"),
                         "health": _evaluate_container_health(c),
                     }
-                    for c in existing_containers
+                    for c in post_containers
                 ],
-            }, indent=2))
-        else:
-            print("========================================================================")
-            print("isolation-check up -- ENVIRONMENT RUNNING (ALREADY ACTIVE)")
-            print(f"Environment: {env_name}")
-            print(f"Project:     {project_name}")
-            print(f"Worktree:    {worktree_path}")
-            if pub_url:
-                print(f"Application URL: {pub_url} (Loopback 127.0.0.1:{pub_port} -> container :{app_port})")
-            print(f"State:       RUNNING")
-            print(f"Health:      {overall_health}")
-            print("========================================================================")
-        return 0
+            }
+            _write_runtime_state(worktree_path, runtime_data)
 
-    # 4. Port allocation with bounded retry for check-to-bind race conflicts
-    attempt = 0
-    excluded_candidates: list[int] = []
-    last_error = ""
-
-    while attempt < MAX_PORT_START_RETRIES:
-        attempt += 1
-        candidate_host_port = allocate_candidate_loopback_port(
-            repo_root, exclude_ports=excluded_candidates
-        )
-        excluded_candidates.append(candidate_host_port)
-
-        # Re-render effective Compose override before startup
-        _render_and_write_override(
-            worktree_path=worktree_path,
-            override_rel_path=override_rel_path,
-            project_name=project_name,
-            db_service=db_service,
-            dedicated_volume=dedicated_volume,
-            publish_db=publish_db,
-            app_service=app_service,
-            app_port=app_port,
-            host_port=candidate_host_port,
-            db_env_var=db_env_var,
-            database_url=database_url,
-        )
-
-        # Build Compose up command
-        cmd = [
-            "docker",
-            "compose",
-            "-p",
-            project_name,
-            "--project-directory",
-            str(worktree_path),
-        ]
-        for bf in base_compose_files:
-            cmd.extend(["-f", str(worktree_path / bf)])
-        cmd.extend(["-f", str(worktree_path / override_rel_path)])
-        cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
-        cmd.extend(["up", "-d"])
-
-        code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
-        if code == 0:
-            # Startup succeeded!
-            break
-
-        last_error = stderr.strip() or stdout.strip() or f"Exited with code {code}"
-        # Retry only if error is a host-port binding conflict
-        if is_port_binding_conflict(last_error) and attempt < MAX_PORT_START_RETRIES:
-            continue
-        else:
-            # Non-port error or exceeded retries: preserve environment and report failure
+            # 7. Format output
             if output_json:
-                print(json.dumps({
+                out = {
                     "schema_version": "1.0",
                     "tool_version": get_package_version(),
-                    "success": False,
+                    "success": True,
                     "environment": env_name,
                     "compose_project": project_name,
-                    "error": last_error,
-                    "preserved_worktree": str(worktree_path),
-                }, indent=2))
+                    "worktree_path": str(worktree_path),
+                    "status": overall_state,
+                    "health": overall_health,
+                    "app_port": app_port,
+                    "host_port": actual_port,
+                    "url": app_url,
+                    "containers": runtime_data["containers"],
+                }
+                print(json.dumps(out, indent=2))
             else:
-                sys.stderr.write(f"\nError: Failed to start environment '{env_name}': {last_error}\n")
-                sys.stderr.write(
-                    f"The environment and generated files at {worktree_path} have been preserved.\n"
-                    f"To inspect or diagnose: cd {worktree_path} && docker compose ps\n"
-                )
-            return 1
+                print("========================================================================")
+                print("isolation-check up -- ENVIRONMENT STARTED")
+                print(f"Environment: {env_name}")
+                print(f"Project:     {project_name}")
+                print(f"Worktree:    {worktree_path}")
+                print()
+                print(f"Application: {app_service} running at {app_url}")
+                print(f"             (Loopback 127.0.0.1:{actual_port} -> container :{app_port})")
+                if publish_db:
+                    print(f"Database:    {db_service} (Host publishing ENABLED)")
+                else:
+                    print(f"Database:    {db_service} (Internal container network only, host unpublished)")
+                print(f"Volume:      {dedicated_volume}")
+                print()
+                print(f"State:       {overall_state}")
+                print(f"Health:      {overall_health}")
+                print("========================================================================")
 
-    # 5. Inspect Docker state post-startup
-    post_containers = _inspect_compose_containers(
-        worktree_path, project_name, base_compose_files, override_rel_path
-    )
-    overall_state, overall_health = _evaluate_overall_status(post_containers)
-    actual_port, app_url = _extract_app_published_port(post_containers, app_service, app_port)
-    if not actual_port:
-        actual_port = candidate_host_port
-        app_url = f"http://127.0.0.1:{actual_port}"
-
-    # 6. Write transient runtime state with restrictive permissions
-    runtime_data = {
-        "schema_version": "1.0",
-        "tool_version": get_package_version(),
-        "environment": env_name,
-        "compose_project": project_name,
-        "status": overall_state,
-        "health": overall_health,
-        "app_service": app_service,
-        "app_port": app_port,
-        "host_port": actual_port,
-        "url": app_url,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "containers": [
-            {
-                "name": c.get("Name"),
-                "service": c.get("Service"),
-                "state": c.get("State"),
-                "health": _evaluate_container_health(c),
-            }
-            for c in post_containers
-        ],
-    }
-    _write_runtime_state(worktree_path, runtime_data)
-
-    # 7. Format output
-    if output_json:
-        out = {
-            "schema_version": "1.0",
-            "tool_version": get_package_version(),
-            "success": True,
-            "environment": env_name,
-            "compose_project": project_name,
-            "worktree_path": str(worktree_path),
-            "status": overall_state,
-            "health": overall_health,
-            "app_port": app_port,
-            "host_port": actual_port,
-            "url": app_url,
-            "containers": runtime_data["containers"],
-        }
-        print(json.dumps(out, indent=2))
-    else:
-        print("========================================================================")
-        print("isolation-check up -- ENVIRONMENT STARTED")
-        print(f"Environment: {env_name}")
-        print(f"Project:     {project_name}")
-        print(f"Worktree:    {worktree_path}")
-        print()
-        print(f"Application: {app_service} running at {app_url}")
-        print(f"             (Loopback 127.0.0.1:{actual_port} -> container :{app_port})")
-        if publish_db:
-            print(f"Database:    {db_service} (Host publishing ENABLED)")
+            return 0
+    except ConcurrencyLockError as exc:
+        if output_json:
+            print(json.dumps({
+                "schema_version": "1.0",
+                "tool_version": get_package_version(),
+                "success": False,
+                "environment": env_name,
+                "error": str(exc),
+            }, indent=2))
         else:
-            print(f"Database:    {db_service} (Internal container network only, host unpublished)")
-        print(f"Volume:      {dedicated_volume}")
-        print()
-        print(f"State:       {overall_state}")
-        print(f"Health:      {overall_health}")
-        print("========================================================================")
-
-    return 0
+            sys.stderr.write(f"Concurrency Error: {exc}\n")
+        return 2
 
 
 def execute_status(
@@ -700,105 +713,120 @@ def execute_down(
     env_rel_path = manifest_data["compose"]["env_file"]
     dedicated_volume = manifest_data.get("database", {}).get("volume_name", "")
 
-    # Check if already stopped (safe repeatability)
+    lock_path = worktree_path / ".isolation-check" / "lifecycle.lock"
     try:
-        containers = _inspect_compose_containers(
-            worktree_path, project_name, base_compose_files, override_rel_path
-        )
-    except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({"success": False, "error": str(exc)}, indent=2))
-        else:
-            sys.stderr.write(f"Security Error: {exc}\n")
-        return 2
-
-    if not containers:
-        # Mark runtime state as stopped
-        state_file = worktree_path / ".isolation-check" / "runtime-state.json"
-        if state_file.is_file():
+        with acquire_environment_lock(lock_path, env_name, "down"):
+            # Check if already stopped (safe repeatability)
             try:
-                s_data = json.loads(state_file.read_text(encoding="utf-8"))
-                s_data["status"] = "STOPPED"
-                s_data["stopped_at"] = datetime.now(timezone.utc).isoformat()
-                state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+                containers = _inspect_compose_containers(
+                    worktree_path, project_name, base_compose_files, override_rel_path
+                )
+            except OwnershipError as exc:
+                if output_json:
+                    print(json.dumps({"success": False, "error": str(exc)}, indent=2))
+                else:
+                    sys.stderr.write(f"Security Error: {exc}\n")
+                return 2
 
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": True,
-                "environment": env_name,
-                "compose_project": project_name,
-                "status": "STOPPED",
-                "message": "Environment is already stopped.",
-                "volume_preserved": dedicated_volume,
-            }, indent=2))
-        else:
-            print(f"Environment '{env_name}' (project '{project_name}') is already stopped.")
-            print(f"Dedicated volume '{dedicated_volume}' and worktree were preserved.")
-        return 0
+            if not containers:
+                # Mark runtime state as stopped
+                state_file = worktree_path / ".isolation-check" / "runtime-state.json"
+                if state_file.is_file():
+                    try:
+                        s_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        s_data["status"] = "STOPPED"
+                        s_data["stopped_at"] = datetime.now(timezone.utc).isoformat()
+                        atomic_write_text(state_file, json.dumps(s_data, indent=2), mode=0o600)
+                    except Exception:
+                        pass
 
-    # Execute docker compose down WITHOUT -v / --volumes
-    cmd = [
-        "docker",
-        "compose",
-        "-p",
-        project_name,
-        "--project-directory",
-        str(worktree_path),
-    ]
-    for bf in base_compose_files:
-        cmd.extend(["-f", str(worktree_path / bf)])
-    cmd.extend(["-f", str(worktree_path / override_rel_path)])
-    cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
-    cmd.extend(["down"])
+                if output_json:
+                    print(json.dumps({
+                        "schema_version": "1.0",
+                        "tool_version": get_package_version(),
+                        "success": True,
+                        "environment": env_name,
+                        "compose_project": project_name,
+                        "status": "STOPPED",
+                        "message": "Environment is already stopped.",
+                        "volume_preserved": dedicated_volume,
+                    }, indent=2))
+                else:
+                    print(f"Environment '{env_name}' (project '{project_name}') is already stopped.")
+                    print(f"Dedicated volume '{dedicated_volume}' and worktree were preserved.")
+                return 0
 
-    code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
-    if code != 0:
-        err = stderr.strip() or stdout.strip() or f"Exited with code {code}"
+            # Execute docker compose down WITHOUT -v / --volumes
+            cmd = [
+                "docker",
+                "compose",
+                "-p",
+                project_name,
+                "--project-directory",
+                str(worktree_path),
+            ]
+            for bf in base_compose_files:
+                cmd.extend(["-f", str(worktree_path / bf)])
+            cmd.extend(["-f", str(worktree_path / override_rel_path)])
+            cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
+            cmd.extend(["down"])
+
+            code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
+            if code != 0:
+                err = stderr.strip() or stdout.strip() or f"Exited with code {code}"
+                if output_json:
+                    print(json.dumps({
+                        "schema_version": "1.0",
+                        "tool_version": get_package_version(),
+                        "success": False,
+                        "environment": env_name,
+                        "error": err,
+                    }, indent=2))
+                else:
+                    sys.stderr.write(f"Error: Failed to stop environment '{env_name}': {err}\n")
+                return 1
+
+            # Mark runtime state as stopped
+            state_file = worktree_path / ".isolation-check" / "runtime-state.json"
+            if state_file.is_file():
+                try:
+                    s_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    s_data["status"] = "STOPPED"
+                    s_data["stopped_at"] = datetime.now(timezone.utc).isoformat()
+                    atomic_write_text(state_file, json.dumps(s_data, indent=2), mode=0o600)
+                except Exception:
+                    pass
+
+            if output_json:
+                print(json.dumps({
+                    "schema_version": "1.0",
+                    "tool_version": get_package_version(),
+                    "success": True,
+                    "environment": env_name,
+                    "compose_project": project_name,
+                    "status": "STOPPED",
+                    "volume_preserved": dedicated_volume,
+                }, indent=2))
+            else:
+                print("========================================================================")
+                print("isolation-check down -- ENVIRONMENT STOPPED")
+                print(f"Environment: {env_name}")
+                print(f"Project:     {project_name}")
+                print(f"Status:      STOPPED")
+                print(f"Storage:     Dedicated volume '{dedicated_volume}' was PRESERVED.")
+                print(f"Worktree:    {worktree_path} was PRESERVED.")
+                print("========================================================================")
+
+            return 0
+    except ConcurrencyLockError as exc:
         if output_json:
             print(json.dumps({
                 "schema_version": "1.0",
                 "tool_version": get_package_version(),
                 "success": False,
                 "environment": env_name,
-                "error": err,
+                "error": str(exc),
             }, indent=2))
         else:
-            sys.stderr.write(f"Error: Failed to stop environment '{env_name}': {err}\n")
-        return 1
-
-    # Mark runtime state as stopped
-    state_file = worktree_path / ".isolation-check" / "runtime-state.json"
-    if state_file.is_file():
-        try:
-            s_data = json.loads(state_file.read_text(encoding="utf-8"))
-            s_data["status"] = "STOPPED"
-            s_data["stopped_at"] = datetime.now(timezone.utc).isoformat()
-            state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-    if output_json:
-        print(json.dumps({
-            "schema_version": "1.0",
-            "tool_version": get_package_version(),
-            "success": True,
-            "environment": env_name,
-            "compose_project": project_name,
-            "status": "STOPPED",
-            "volume_preserved": dedicated_volume,
-        }, indent=2))
-    else:
-        print("========================================================================")
-        print("isolation-check down -- ENVIRONMENT STOPPED")
-        print(f"Environment: {env_name}")
-        print(f"Project:     {project_name}")
-        print(f"Status:      STOPPED")
-        print(f"Storage:     Dedicated volume '{dedicated_volume}' was PRESERVED.")
-        print(f"Worktree:    {worktree_path} was PRESERVED.")
-        print("========================================================================")
-
-    return 0
+            sys.stderr.write(f"Concurrency Error: {exc}\n")
+        return 2

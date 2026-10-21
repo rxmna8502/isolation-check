@@ -10,6 +10,7 @@ import secrets
 from typing import Any
 
 from isolation_check.create.spec import CreateSpec
+from isolation_check.runtime.concurrency import atomic_write_text
 from isolation_check.version import MANIFEST_SCHEMA_VERSION, get_package_version
 
 
@@ -153,11 +154,7 @@ def write_generated_environment_files(
     # 1. Override compose YAML
     override_file = wt / plan.override_compose_rel_path
     override_content = build_override_compose_content(spec, plan, raw_compose)
-    override_file.write_text(override_content, encoding="utf-8")
-    try:
-        os.chmod(override_file, 0o600)
-    except OSError:
-        pass
+    atomic_write_text(override_file, override_content, mode=0o600)
     created_paths.append(override_file)
 
     # 2. Private env file
@@ -168,11 +165,7 @@ def write_generated_environment_files(
         f"{spec.db_env_var}={plan.database_url}\n"
         f"ISOLATION_CHECK_ENV={spec.name}\n"
     )
-    env_file.write_text(env_content, encoding="utf-8")
-    try:
-        os.chmod(env_file, 0o600)
-    except OSError:
-        pass
+    atomic_write_text(env_file, env_content, mode=0o600)
     created_paths.append(env_file)
 
     # 3. Versioned ownership manifest (NO plaintext credentials)
@@ -217,11 +210,7 @@ def write_generated_environment_files(
             plan.manifest_rel_path,
         ],
     }
-    manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
-    try:
-        os.chmod(manifest_file, 0o600)
-    except OSError:
-        pass
+    atomic_write_text(manifest_file, json.dumps(manifest_data, indent=2), mode=0o600)
     created_paths.append(manifest_file)
 
     return created_paths

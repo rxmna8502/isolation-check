@@ -1,0 +1,17 @@
+{
+  "name": "port_ipv6_b",
+  "services": {
+    "web": {
+      "image": "alpine",
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "::1",
+          "target": 80,
+          "published": "8080",
+          "protocol": "tcp"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+name: beta_anon
+services:
+  worker:
+    image: alpine:latest
+    volumes:
+      - /var/cache/app

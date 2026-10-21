@@ -1,0 +1,6 @@
+name: port_expose_b
+services:
+  web:
+    image: alpine:latest
+    expose:
+      - "3000"

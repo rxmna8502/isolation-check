@@ -1,0 +1,11 @@
+{
+  "name": "port_expose_a",
+  "services": {
+    "web": {
+      "image": "alpine",
+      "expose": [
+        "3000"
+      ]
+    }
+  }
+}

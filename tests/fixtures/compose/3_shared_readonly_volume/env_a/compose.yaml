@@ -1,0 +1,9 @@
+name: alpha_ro
+services:
+  app:
+    image: alpine:latest
+    volumes:
+      - fixtures_vol:/data/fixtures:ro
+volumes:
+  fixtures_vol:
+    name: shared_fixtures

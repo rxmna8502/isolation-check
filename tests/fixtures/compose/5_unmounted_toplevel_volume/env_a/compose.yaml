@@ -1,0 +1,9 @@
+name: alpha_mounted
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - shared_vol:/data
+volumes:
+  shared_vol:
+    name: shared_backup_volume

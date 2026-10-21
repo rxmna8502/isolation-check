@@ -1,0 +1,6 @@
+name: port_ipv6_a
+services:
+  web:
+    image: alpine:latest
+    ports:
+      - "[::1]:8080:80"

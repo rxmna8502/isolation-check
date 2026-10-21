@@ -1,0 +1,6 @@
+name: port_dynamic_a
+services:
+  web:
+    image: alpine:latest
+    ports:
+      - target: 3000

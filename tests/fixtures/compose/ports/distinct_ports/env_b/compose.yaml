@@ -1,0 +1,6 @@
+name: port_distinct_b
+services:
+  web:
+    image: alpine:latest
+    ports:
+      - "3001:3001"

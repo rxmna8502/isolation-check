@@ -1,0 +1,9 @@
+name: alpha_project
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - db_data:/var/lib/postgresql/data
+volumes:
+  db_data:
+    name: shared_pgdata

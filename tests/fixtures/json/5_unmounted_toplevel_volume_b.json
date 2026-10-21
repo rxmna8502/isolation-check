@@ -1,0 +1,24 @@
+{
+  "name": "beta_unmounted",
+  "services": {
+    "web": {
+      "image": "nginx:alpine",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "web_data",
+          "target": "/var/www",
+          "read_only": false
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "shared_vol": {
+      "name": "shared_backup_volume"
+    },
+    "web_data": {
+      "name": "beta_unmounted_web_data"
+    }
+  }
+}

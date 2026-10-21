@@ -1,0 +1,10 @@
+name: beta_unmounted
+services:
+  web:
+    image: nginx:alpine
+    volumes:
+      - web_data:/var/www
+volumes:
+  shared_vol:
+    name: shared_backup_volume
+  web_data:

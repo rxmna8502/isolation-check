@@ -1,0 +1,6 @@
+name: port_proto_udp
+services:
+  web:
+    image: alpine:latest
+    ports:
+      - "3000:3000/udp"

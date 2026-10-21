@@ -1,0 +1,16 @@
+{
+  "name": "port_wildcard_a",
+  "services": {
+    "web": {
+      "image": "alpine",
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 3000,
+          "published": "3000",
+          "protocol": "tcp"
+        }
+      ]
+    }
+  }
+}

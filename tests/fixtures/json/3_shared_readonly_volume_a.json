@@ -1,0 +1,21 @@
+{
+  "name": "alpha_ro",
+  "services": {
+    "app": {
+      "image": "alpine:latest",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "fixtures_vol",
+          "target": "/data/fixtures",
+          "read_only": true
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "fixtures_vol": {
+      "name": "shared_fixtures"
+    }
+  }
+}

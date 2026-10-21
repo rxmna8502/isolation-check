@@ -1,0 +1,16 @@
+{
+  "name": "alpha_anon",
+  "services": {
+    "worker": {
+      "image": "alpine:latest",
+      "volumes": [
+        {
+          "type": "volume",
+          "target": "/var/cache/app",
+          "read_only": false
+        }
+      ]
+    }
+  },
+  "volumes": {}
+}

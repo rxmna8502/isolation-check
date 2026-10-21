@@ -1,0 +1,9 @@
+{
+  "name": "port_hostnet_a",
+  "services": {
+    "web": {
+      "image": "alpine",
+      "network_mode": "host"
+    }
+  }
+}

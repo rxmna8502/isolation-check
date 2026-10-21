@@ -1,0 +1,21 @@
+{
+  "name": "alpha_mounted",
+  "services": {
+    "db": {
+      "image": "postgres:16",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "shared_vol",
+          "target": "/data",
+          "read_only": false
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "shared_vol": {
+      "name": "shared_backup_volume"
+    }
+  }
+}

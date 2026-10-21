@@ -1,0 +1,6 @@
+name: port_internal_b
+services:
+  app:
+    image: alpine:latest
+    ports:
+      - "8002:3000"

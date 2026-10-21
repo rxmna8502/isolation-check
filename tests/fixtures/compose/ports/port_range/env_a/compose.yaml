@@ -1,0 +1,6 @@
+name: port_range_a
+services:
+  web:
+    image: alpine:latest
+    ports:
+      - "8001-8005:8001-8005"

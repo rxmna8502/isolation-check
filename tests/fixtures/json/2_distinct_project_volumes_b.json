@@ -1,0 +1,21 @@
+{
+  "name": "beta_isolated",
+  "services": {
+    "db": {
+      "image": "postgres:16",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "db_data",
+          "target": "/var/lib/postgresql/data",
+          "read_only": false
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "db_data": {
+      "name": "beta_isolated_db_data"
+    }
+  }
+}

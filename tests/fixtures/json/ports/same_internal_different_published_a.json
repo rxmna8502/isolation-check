@@ -1,0 +1,16 @@
+{
+  "name": "port_internal_a",
+  "services": {
+    "app": {
+      "image": "alpine",
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 3000,
+          "published": "8001",
+          "protocol": "tcp"
+        }
+      ]
+    }
+  }
+}

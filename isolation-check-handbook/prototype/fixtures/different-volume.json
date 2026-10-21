@@ -1,0 +1,10 @@
+{
+  "schema_version": "demo-v1",
+  "scope_id": "local-demo",
+  "volumes": [
+    {
+      "name": "payments_pgdata",
+      "read_only": false
+    }
+  ]
+}

@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -40,7 +40,7 @@ jobs:
 
   packaging:
     name: Package Build & Clean Verification
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: test
 
     steps:
@@ -80,7 +80,7 @@ jobs:
 
   docker-smoke-test:
     name: Real Docker Lifecycle Smoke Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test, packaging]
 
     steps:

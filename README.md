@@ -21,7 +21,7 @@ Running tests or database migrations in Worktree A can silently overwrite or cor
 ## Early Alpha Warning
 
 > [!WARNING]
-> **Project Status (v0.3.0a1 - Public Alpha Preview):**
+> **Project Status (v0.3.0a2 - Public Alpha Preview):**
 > `isolation-check` is in early alpha development. It is intended for testing and evaluation in local development environments.
 > - Current scope is strictly limited to tested configurations: local Linux, Docker Compose, PostgreSQL, and one explicitly configured application service.
 > - Destructive resource cleanup (`destroy`) is intentionally not implemented in this release to prevent accidental data loss.

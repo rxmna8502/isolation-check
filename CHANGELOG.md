@@ -4,6 +4,19 @@ All notable changes to `isolation-check` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0a2] - Unreleased (Public Alpha Release Hardening)
+
+Supersedes `v0.3.0a1` with critical concurrency, process-identity, port allocation, and permission hardening:
+
+### Fixed & Hardened
+- **Active-Lock Safety**: Lock files are never reclaimed based on elapsed time while verified owner processes remain alive. Separated caller wait timeout from lock abandonment criteria.
+- **Lock-Owner Tokens & PID-Reuse Protection**: Lock records now store unique owner tokens, host identity, command name, and process start-time identity (`/proc/[pid]/stat` on Linux, `GetProcessTimes` on Windows) to detect PID reuse and prevent one process from deleting another's lock.
+- **Cross-Environment Port Synchronization**: Resolved port allocation races between concurrent environments using atomic reservation files (`.isolation-check/ports/<port>.json`) and a repository-scoped port-allocation lock during Docker Compose startup.
+- **Atomic State Writes**: All generated configuration, environment records, manifest files, and runtime-state files use temporary files with `os.fsync` and `os.replace` to prevent partial or corrupted reads.
+- **Private-File Permission Preservation**: Private files such as `isolation.env` and runtime state are created with restrictive permissions (`0600`) at initial file creation time on POSIX, eliminating any broad-permission window.
+- **Exit-Code Contract Enforcement**: Strictly enforces exit codes across text and JSON output: `0` for no failures (warnings/unknown permitted in normal mode), `1` for one or more failures (`VOL001`, `PORT001`, etc.), and `2` for invalid inputs, arguments, or strict-mode unresolved results.
+- **Removal of Destructive Down Flags**: Completely removed `-v` and `--volumes` from `down` argument parser; passing either is rejected with exit code 2 to guarantee database volumes are never accidentally removed.
+
 ## [0.3.0a1] - Unreleased (Public Alpha Release Readiness)
 
 ### Added

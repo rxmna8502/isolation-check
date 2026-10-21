@@ -5,7 +5,7 @@ import importlib.metadata
 
 # Distinct version constants for package, manifest schema, and runtime-state schema
 PACKAGE_NAME = "isolation-check"
-DEFAULT_PACKAGE_VERSION = "0.3.0a1"
+DEFAULT_PACKAGE_VERSION = "0.3.0a2"
 MANIFEST_SCHEMA_VERSION = 1
 RUNTIME_STATE_SCHEMA_VERSION = "1.0"
 

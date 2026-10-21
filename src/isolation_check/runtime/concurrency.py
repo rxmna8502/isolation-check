@@ -6,12 +6,11 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import time
-from typing import Generator
+from typing import Any, Generator
 import uuid
-
-DEFAULT_STALE_LOCK_TIMEOUT_SECONDS = 120.0
 
 
 class ConcurrencyLockError(Exception):
@@ -22,6 +21,15 @@ def atomic_write_text(target_path: Path | str, content: str, mode: int | None = 
     """Writes text to target_path atomically using a temporary file and atomic replace.
 
     Guarantees that readers never observe partially written or corrupted files.
+
+    Permissions:
+    - On POSIX platforms, if `mode` is specified (e.g. 0o600), the temporary file is created
+      with restrictive permissions from the initial open call, preventing a window of broad
+      or world-readable access, and the mode is preserved across atomic replacement.
+    - Note on Windows: File permissions in Windows NTFS are governed by Access Control Lists (ACLs)
+      rather than POSIX octal modes. In Python on Windows, `os.chmod` only toggles read-only flags
+      and cannot restrict read access to the file owner. On POSIX systems, `mode` is strictly
+      enforced from creation through atomic replacement.
     """
     target = Path(target_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -30,13 +38,18 @@ def atomic_write_text(target_path: Path | str, content: str, mode: int | None = 
     temp_name = f".{target.name}.tmp.{os.getpid()}_{uuid.uuid4().hex[:8]}"
     temp_path = target.parent / temp_name
 
+    # Use restrictive permissions on initial file creation
+    open_flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+    open_mode = mode if mode is not None else 0o666
+
+    fd = os.open(str(temp_path), open_flags, open_mode)
     try:
-        with open(temp_path, "w", encoding="utf-8") as f:
+        with open(fd, "w", encoding="utf-8", closefd=True) as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
 
-        if mode is not None:
+        if mode is not None and sys.platform != "win32":
             try:
                 os.chmod(temp_path, mode)
             except OSError:
@@ -44,6 +57,12 @@ def atomic_write_text(target_path: Path | str, content: str, mode: int | None = 
 
         # Atomic replacement
         os.replace(temp_path, target)
+
+        if mode is not None and sys.platform != "win32":
+            try:
+                os.chmod(target, mode)
+            except OSError:
+                pass
     except Exception:
         if temp_path.exists():
             try:
@@ -51,6 +70,56 @@ def atomic_write_text(target_path: Path | str, content: str, mode: int | None = 
             except OSError:
                 pass
         raise
+
+
+def get_process_start_time(pid: int) -> str | None:
+    """Returns a unique start-time identifier for a process to detect PID reuse, or None if unavailable."""
+    if pid <= 0:
+        return None
+
+    if sys.platform == "linux":
+        try:
+            stat_path = Path(f"/proc/{pid}/stat")
+            if stat_path.is_file():
+                content = stat_path.read_text(encoding="utf-8", errors="replace")
+                rparen = content.rfind(")")
+                if rparen != -1:
+                    fields = content[rparen + 1:].strip().split()
+                    # Field index 19 corresponds to starttime (22nd field in /proc/[pid]/stat)
+                    if len(fields) > 19:
+                        return fields[19]
+        except Exception:
+            return None
+
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                class FILETIME(ctypes.Structure):
+                    _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+                create_time = FILETIME()
+                exit_time = FILETIME()
+                kernel_time = FILETIME()
+                user_time = FILETIME()
+                if kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(create_time),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel_time),
+                    ctypes.byref(user_time),
+                ):
+                    val = (create_time.dwHighDateTime << 32) | create_time.dwLowDateTime
+                    kernel32.CloseHandle(handle)
+                    return str(val)
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+
+    return None
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -78,24 +147,82 @@ def _is_pid_alive(pid: int) -> bool:
             return exc.errno == errno.EPERM
 
 
+def is_lock_abandoned(lock_data: dict[str, Any]) -> tuple[bool, str]:
+    """Determines whether an existing lock is proven abandoned.
+
+    Returns:
+        (is_abandoned, reason)
+    """
+    lock_pid = lock_data.get("pid")
+    lock_host = lock_data.get("host")
+    lock_start_time = lock_data.get("process_start_time")
+    current_host = socket.gethostname()
+
+    # Rule 1: Different host cannot be safely inspected or verified as dead
+    if lock_host and lock_host != current_host:
+        return False, f"Lock is held on a different host ('{lock_host}'; current host is '{current_host}')."
+
+    # Rule 2: Non-integer or missing PID
+    if not isinstance(lock_pid, int) or lock_pid <= 0:
+        return False, "Lock contains invalid or missing process ID (PID)."
+
+    # Rule 3: Check if PID is alive on current host
+    if not _is_pid_alive(lock_pid):
+        return True, f"Process PID {lock_pid} is no longer running on this host."
+
+    # Rule 4: PID is alive -> check for PID reuse via start-time verification
+    if lock_start_time is not None:
+        current_start_time = get_process_start_time(lock_pid)
+        if current_start_time is not None and current_start_time != lock_start_time:
+            return (
+                True,
+                f"Process PID {lock_pid} has a mismatched start identity "
+                f"({current_start_time} != {lock_start_time}); original owner terminated.",
+            )
+        if current_start_time is not None and current_start_time == lock_start_time:
+            return False, f"Owner process PID {lock_pid} is actively running."
+
+    # If start time could not be queried or matches, live PID must never be stolen based on age
+    return False, f"Owner process PID {lock_pid} is currently alive."
+
+
 @contextlib.contextmanager
 def acquire_environment_lock(
     lock_path: Path | str,
     env_name: str,
     command: str,
-    stale_timeout: float = DEFAULT_STALE_LOCK_TIMEOUT_SECONDS,
+    timeout: float = 0.0,
+    poll_interval: float = 0.05,
 ) -> Generator[Path, None, None]:
-    """Acquires an exclusive lifecycle lock file with stale-lock detection and recovery.
+    """Acquires an exclusive lifecycle lock file with robust owner identity and stale-lock recovery.
 
-    Raises ConcurrencyLockError if another active process is currently holding the lock.
+    A lock is NEVER reclaimed solely based on elapsed time while its verified owner process is alive.
+
+    Args:
+        lock_path: Path to the lock file.
+        env_name: Name of the environment being locked.
+        command: Command name or description requesting the lock.
+        timeout: Maximum duration (seconds) the caller will wait to acquire the lock.
+        poll_interval: Interval (seconds) between acquisition attempts.
+
+    Raises:
+        ConcurrencyLockError: If the lock cannot be acquired within the timeout.
     """
     path = Path(lock_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     acquired = False
-    lock_fd = None
+    lock_fd: int | None = None
+    owner_token = uuid.uuid4().hex
+    host = socket.gethostname()
+    current_pid = os.getpid()
+    proc_start_time = get_process_start_time(current_pid)
 
-    for attempt in range(2):
+    start_wait = time.monotonic()
+    last_lock_data: dict[str, Any] = {}
+    last_abandon_reason = ""
+
+    while True:
         try:
             # Atomic exclusive file creation
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
@@ -103,60 +230,65 @@ def acquire_environment_lock(
             acquired = True
             break
         except FileExistsError:
-            # Check if existing lock is stale
-            is_stale = False
-            lock_data: dict = {}
-
-            try:
-                raw = path.read_text(encoding="utf-8")
-                lock_data = json.loads(raw)
-            except Exception:
-                # Corrupted or unreadable lock file is treated as potentially stale if age > timeout
-                pass
-
-            lock_pid = lock_data.get("pid")
-            acquired_at_str = lock_data.get("acquired_at")
-            age = float("inf")
-            if acquired_at_str:
+            # Read existing lock data
+            lock_data: dict[str, Any] = {}
+            for _ in range(2):
                 try:
-                    acquired_at = datetime.fromisoformat(acquired_at_str)
-                    age = (datetime.now(timezone.utc) - acquired_at).total_seconds()
+                    raw = path.read_text(encoding="utf-8")
+                    if raw.strip():
+                        lock_data = json.loads(raw)
+                        break
                 except Exception:
-                    pass
+                    time.sleep(0.02)
 
-            # Stale condition 1: PID is no longer alive
-            if isinstance(lock_pid, int) and not _is_pid_alive(lock_pid):
-                is_stale = True
-            # Stale condition 2: Lock exceeded timeout
-            elif age > stale_timeout:
-                is_stale = True
+            last_lock_data = lock_data
+            abandoned, reason = is_lock_abandoned(lock_data)
+            last_abandon_reason = reason
 
-            if is_stale and attempt == 0:
-                # Recover from stale lock
+            if abandoned:
+                # Safely reclaim abandoned lock
                 try:
                     path.unlink(missing_ok=True)
                     continue
                 except OSError:
                     pass
 
-            # If not stale or second attempt failed, reject operation
-            held_by = f"PID {lock_pid}" if lock_pid else "another process"
-            held_cmd = f" running '{lock_data.get('command')}'" if lock_data.get("command") else ""
-            raise ConcurrencyLockError(
-                f"Environment '{env_name}' is locked by {held_by}{held_cmd}. "
-                "Concurrent lifecycle operations on the same environment are prevented."
-            )
+            elapsed = time.monotonic() - start_wait
+            if elapsed >= timeout:
+                # Timed out waiting for an active lock.
+                # Do NOT mutate the existing active lock!
+                held_pid = lock_data.get("pid")
+                held_host = lock_data.get("host") or "unknown"
+                held_cmd = lock_data.get("command") or "unknown"
+                held_time = lock_data.get("created_at") or "unknown"
+
+                msg = [
+                    f"Environment '{env_name}' is locked by PID {held_pid} on host '{held_host}'",
+                    f"(command: '{held_cmd}', acquired at {held_time}).",
+                    f"Existing lock cannot be proven abandoned: {reason}",
+                    "",
+                    "Recovery procedure:",
+                    f"  1. Verify if process PID {held_pid} is still actively running on host '{held_host}'.",
+                    f"  2. If the process terminated abnormally without releasing the lock, manually remove:",
+                    f"       {path}",
+                ]
+                raise ConcurrencyLockError("\n".join(msg))
+
+            time.sleep(poll_interval)
 
     if not acquired or lock_fd is None:
         raise ConcurrencyLockError(f"Could not acquire lock for environment '{env_name}'.")
 
     try:
-        # Write lock payload into opened descriptor
+        # Write robust owner identity into opened descriptor
         payload = json.dumps({
-            "pid": os.getpid(),
+            "pid": current_pid,
+            "process_start_time": proc_start_time,
+            "host": host,
+            "owner_token": owner_token,
             "command": command,
             "environment": env_name,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }, indent=2).encode("utf-8")
         os.write(lock_fd, payload)
         os.close(lock_fd)
@@ -169,7 +301,13 @@ def acquire_environment_lock(
                 os.close(lock_fd)
             except OSError:
                 pass
+
+        # Use lock-owner token to ensure we NEVER delete another process's lock
         try:
-            path.unlink(missing_ok=True)
-        except OSError:
+            if path.is_file():
+                raw = path.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if data.get("owner_token") == owner_token:
+                    path.unlink(missing_ok=True)
+        except Exception:
             pass

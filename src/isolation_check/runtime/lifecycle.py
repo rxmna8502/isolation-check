@@ -20,6 +20,7 @@ from isolation_check.runtime.concurrency import (
 from isolation_check.runtime.port_allocator import (
     allocate_candidate_loopback_port,
     is_port_binding_conflict,
+    release_port_reservation,
 )
 from isolation_check.runtime.validation import OwnershipError, locate_and_validate_environment
 from isolation_check.version import get_package_version
@@ -400,55 +401,77 @@ def execute_up(
             attempt = 0
             excluded_candidates: list[int] = []
             last_error = ""
+            candidate_host_port: int | None = None
+            port_lock_path = repo_root / ".isolation-check" / "port-allocation.lock"
 
             while attempt < MAX_PORT_START_RETRIES:
                 attempt += 1
-                candidate_host_port = allocate_candidate_loopback_port(
-                    repo_root, exclude_ports=excluded_candidates
-                )
-                excluded_candidates.append(candidate_host_port)
+                try:
+                    with acquire_environment_lock(
+                        port_lock_path,
+                        env_name,
+                        "port-allocation",
+                        timeout=60.0,
+                    ):
+                        candidate_host_port = allocate_candidate_loopback_port(
+                            repo_root,
+                            env_name=env_name,
+                            exclude_ports=excluded_candidates,
+                        )
+                        excluded_candidates.append(candidate_host_port)
 
-                # Re-render effective Compose override before startup
-                _render_and_write_override(
-                    worktree_path=worktree_path,
-                    override_rel_path=override_rel_path,
-                    project_name=project_name,
-                    db_service=db_service,
-                    dedicated_volume=dedicated_volume,
-                    publish_db=publish_db,
-                    app_service=app_service,
-                    app_port=app_port,
-                    host_port=candidate_host_port,
-                    db_env_var=db_env_var,
-                    database_url=database_url,
-                )
+                        # Re-render effective Compose override before startup
+                        _render_and_write_override(
+                            worktree_path=worktree_path,
+                            override_rel_path=override_rel_path,
+                            project_name=project_name,
+                            db_service=db_service,
+                            dedicated_volume=dedicated_volume,
+                            publish_db=publish_db,
+                            app_service=app_service,
+                            app_port=app_port,
+                            host_port=candidate_host_port,
+                            db_env_var=db_env_var,
+                            database_url=database_url,
+                        )
 
-                # Build Compose up command
-                cmd = [
-                    "docker",
-                    "compose",
-                    "-p",
-                    project_name,
-                    "--project-directory",
-                    str(worktree_path),
-                ]
-                for bf in base_compose_files:
-                    cmd.extend(["-f", str(worktree_path / bf)])
-                cmd.extend(["-f", str(worktree_path / override_rel_path)])
-                cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
-                cmd.extend(["up", "-d"])
+                        # Build Compose up command
+                        cmd = [
+                            "docker",
+                            "compose",
+                            "-p",
+                            project_name,
+                            "--project-directory",
+                            str(worktree_path),
+                        ]
+                        for bf in base_compose_files:
+                            cmd.extend(["-f", str(worktree_path / bf)])
+                        cmd.extend(["-f", str(worktree_path / override_rel_path)])
+                        cmd.extend(["--env-file", str(worktree_path / env_rel_path)])
+                        cmd.extend(["up", "-d"])
 
-                code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
+                        code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
+                except ConcurrencyLockError as exc:
+                    last_error = str(exc)
+                    code = 1
+                    stdout = ""
+                    stderr = str(exc)
+
                 if code == 0:
                     # Startup succeeded!
                     break
 
                 last_error = stderr.strip() or stdout.strip() or f"Exited with code {code}"
-                # Retry only if error is a host-port binding conflict
+                # If candidate failed to bind, release transient reservation for that candidate
+                if candidate_host_port is not None:
+                    release_port_reservation(repo_root, env_name, candidate_host_port)
+
+                # Retry only if error is an identified host-port binding conflict
                 if is_port_binding_conflict(last_error) and attempt < MAX_PORT_START_RETRIES:
                     continue
                 else:
-                    # Non-port error or exceeded retries: preserve environment and report failure
+                    # Non-port error or exceeded retries: release all reservations, preserve environment and report failure
+                    release_port_reservation(repo_root, env_name)
                     if output_json:
                         print(json.dumps({
                             "schema_version": "1.0",
@@ -729,6 +752,7 @@ def execute_down(
                 return 2
 
             if not containers:
+                release_port_reservation(rec_file.parent.parent.parent, env_name)
                 # Mark runtime state as stopped
                 state_file = worktree_path / ".isolation-check" / "runtime-state.json"
                 if state_file.is_file():
@@ -785,6 +809,8 @@ def execute_down(
                 else:
                     sys.stderr.write(f"Error: Failed to stop environment '{env_name}': {err}\n")
                 return 1
+
+            release_port_reservation(rec_file.parent.parent.parent, env_name)
 
             # Mark runtime state as stopped
             state_file = worktree_path / ".isolation-check" / "runtime-state.json"

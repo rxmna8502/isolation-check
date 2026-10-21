@@ -2,6 +2,7 @@
 
 Runs only when an active Docker daemon and Docker Compose CLI are available.
 """
+import concurrent.futures
 import contextlib
 import io
 import json
@@ -135,12 +136,27 @@ publish_db = false
         )
         self.assertEqual(execute_create(spec_b), 0)
 
-        # Step 2: Start both environments simultaneously
-        code_up_a = execute_up("env-smoke-a", repo_hint=self.repo_dir)
-        self.assertEqual(code_up_a, 0)
+        # Step 2: Launch both environments concurrently using ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_a = executor.submit(execute_up, "env-smoke-a", repo_hint=self.repo_dir)
+            fut_b = executor.submit(execute_up, "env-smoke-b", repo_hint=self.repo_dir)
+            code_up_a = fut_a.result()
+            code_up_b = fut_b.result()
 
-        code_up_b = execute_up("env-smoke-b", repo_hint=self.repo_dir)
-        self.assertEqual(code_up_b, 0)
+        self.assertEqual(code_up_a, 0, "Concurrent up for env-smoke-a failed!")
+        self.assertEqual(code_up_b, 0, "Concurrent up for env-smoke-b failed!")
+
+        # Confirm no managed state was corrupted during concurrent startup
+        wt_a = self.repo_dir / ".." / "env-smoke-a"
+        wt_b = self.repo_dir / ".." / "env-smoke-b"
+        state_a_file = wt_a / ".isolation-check" / "runtime-state.json"
+        state_b_file = wt_b / ".isolation-check" / "runtime-state.json"
+        self.assertTrue(state_a_file.is_file())
+        self.assertTrue(state_b_file.is_file())
+        state_data_a = json.loads(state_a_file.read_text(encoding="utf-8"))
+        state_data_b = json.loads(state_b_file.read_text(encoding="utf-8"))
+        self.assertEqual(state_data_a.get("status"), "RUNNING")
+        self.assertEqual(state_data_b.get("status"), "RUNNING")
 
         # Query status of env-smoke-a
         out_a = io.StringIO()

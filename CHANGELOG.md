@@ -4,7 +4,44 @@ All notable changes to `isolation-check` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.3.0a2] - Unreleased (Public Alpha Release Hardening)
+## [Unreleased]
+
+### Added
+- Keyboard-driven interactive Terminal User Interface (TUI) powered by Textual as the default experience when running `isolation-check` with no arguments in an interactive terminal.
+- Home screen navigation with support for 8 top-level workflows: Get started, Create an environment, Manage environments, Check for collisions, Check prerequisites, Check for updates, Help, and Exit.
+- Interactive "Get started" 5-step sequential wizard guiding users through:
+  1. Selecting and verifying a local Git repository.
+  2. Diagnosing runtime prerequisites with clear distinction between warnings and blocking failures.
+  3. Inspecting Compose configurations and explicitly confirming distinct application and PostgreSQL service mappings.
+  4. Configuring database connection environment variables and application container target ports (kept distinct from dynamic runtime host ports).
+  5. Reviewing the proposed configuration, rendering unified overwrite diffs against existing `isolation-check.toml`, and requiring explicit modal confirmation before writing.
+- Dynamic wizard navigation featuring Back and Next actions, active step progress indicators, full backward input preservation, dependent downstream validation invalidation upon upstream input changes, and plain-language error summaries with technical output tucked behind expandable "Show details" toggles.
+- Interactive "Create an environment" form with dry-run planning, pre-flight validation error display, password redaction, and explicit confirmation before creating Git worktrees and Compose environments.
+- Interactive "Manage environments" dashboard displaying registered environments, observed container state, loopback application URLs, and health statuses, with capabilities to inspect details, start environments, safely stop environments (with volume preservation confirmation), and refresh live state.
+- Interactive "Check for collisions" screen to audit two environment configurations using `VOL001` and `PORT001` rules with clear separation of PASS, WARN, FAIL, and UNKNOWN findings and coverage disclaimers.
+- Interactive "Check prerequisites" screen providing read-only diagnosis of Python version, Git availability, Docker CLI, Docker daemon reachability, Docker Compose version, and sequence override tag support, with actionable repair instructions and runtime scope explanations.
+- Interactive "Check for updates" screen with on-demand PyPI metadata querying, PEP 440 version comparison, stable vs prerelease categorization, offline mode tolerance, and safe copyable upgrade commands for pip, pipx, and uv.
+- Interactive "Help" screen documenting core workflows, safety boundaries, and direct CLI command examples.
+- Headless TUI test suite testing interactive launches, non-interactive CLI fallback, menu navigation, lifecycle operations, prereq diagnosis, update checks, and safety guardrails.
+
+### Changed
+- Promoted Textual to a required runtime dependency in `pyproject.toml`.
+- Added `packaging` runtime dependency in `pyproject.toml` for PEP 440 version parsing.
+- Refactored lifecycle, create, and status routines to expose typed structured data objects without altering existing CLI contracts, JSON output schemas, or exit codes.
+
+### Fixed
+- Enforced strict exact OCI image repository matching (`extract_image_repository()`) for PostgreSQL candidates in `validate_postgres_service_definition()` and TUI adapters, supporting only the official `postgres` distribution repository (`docker.io/library/postgres`, `postgres`, `library/postgres`).
+- Classified database variants (PostGIS, TimescaleDB, Crunchy Data, and custom forks) as unverified and unsupported with tailored explanations, displaying them in the dedicated unsupported datastores callout rather than loose substring acceptance.
+- Restored test discovery and regression coverage for all 8 Get Started wizard tests in `tests/unit/test_tui.py` (`TestGetStartedWizard`), bringing discovery from 160 to 168 tests (167 passing, 1 platform-specific skip).
+- Fixed service-selection UX in Get Started wizard to classify services from resolved Compose models using shared backend validation rules rather than raw service names, ensuring unrelated services (Kafka, Mailpit, Redis, web-portal) are never offered as PostgreSQL candidates.
+- Added explicit evidence display (image tags) for qualifying PostgreSQL candidates, actionable explanations blocking progression when no PostgreSQL service qualifies, and separate callout boxes showing unrecognized or custom database services with their unsupported reasons.
+- Enhanced application selector to display declared target ports, source/image details, and infrastructure labels (`[Infrastructure: ...]`), requiring explicit user confirmation via "Confirm Service Selection" instead of auto-confirming the first alphabetic candidate.
+- Added strict connection configuration validation for selected application-database pairs before allowing progression or saving, automatically invalidating confirmation and downstream configuration upon selection changes.
+- Bounded Select overlay dropdown heights with scrolling and added accessible keyboard navigation instructions, keeping navigation reachable across standard 80x24 and 100x34 terminal dimensions.
+- Fixed return contract mismatch in `save_config_toml()` which previously returned `None` instead of `tuple[bool, str | None]`, causing a `TypeError: cannot unpack non-iterable NoneType object` crash when saving or confirming an overwrite in the Get Started wizard.
+- Added explicit return contract `tuple[bool, str | None]` and safe atomic write validation to `save_config_toml()`, guaranteeing existing configuration files are preserved on write errors and presenting sanitized inline error messages in the TUI without crashing.
+
+## [0.3.0a2] - 2026-10-21 (Public Alpha Release Hardening)
 
 Supersedes `v0.3.0a1` with critical concurrency, process-identity, port allocation, and permission hardening:
 

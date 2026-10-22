@@ -1,6 +1,7 @@
 """Managed runtime lifecycle implementation: up, status, and down."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -24,6 +25,129 @@ from isolation_check.runtime.port_allocator import (
 )
 from isolation_check.runtime.validation import OwnershipError, locate_and_validate_environment
 from isolation_check.version import get_package_version
+
+
+@dataclass
+class EnvironmentStatusResult:
+    success: bool
+    environment: str
+    compose_project: str = ""
+    worktree_path: str = ""
+    status: str = "UNKNOWN"
+    health: str = "UNKNOWN"
+    app_target_port: int | None = None
+    host_port: int | None = None
+    url: str | None = None
+    ownership_verified: bool = False
+    stale_runtime_state: bool = False
+    containers: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    exit_code: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.success:
+            return {
+                "schema_version": "1.0",
+                "tool_version": get_package_version(),
+                "success": False,
+                "environment": self.environment,
+                "error": self.error or "Status check failed",
+            }
+        return {
+            "schema_version": "1.0",
+            "tool_version": get_package_version(),
+            "environment": self.environment,
+            "compose_project": self.compose_project,
+            "worktree_path": self.worktree_path,
+            "status": self.status,
+            "health": self.health,
+            "app_target_port": self.app_target_port,
+            "host_port": self.host_port,
+            "url": self.url,
+            "ownership_verified": self.ownership_verified,
+            "stale_runtime_state": self.stale_runtime_state,
+            "containers": [
+                {
+                    "name": c.get("Name"),
+                    "service": c.get("Service"),
+                    "state": c.get("State"),
+                    "health": _evaluate_container_health(c),
+                }
+                for c in self.containers
+            ],
+        }
+
+
+@dataclass
+class LifecycleActionResult:
+    success: bool
+    environment: str
+    compose_project: str = ""
+    worktree_path: str = ""
+    status: str = ""
+    health: str = ""
+    host_port: int | None = None
+    app_port: int | None = None
+    url: str | None = None
+    already_running: bool = False
+    containers: list[dict[str, Any]] = field(default_factory=list)
+    volume_preserved: str = ""
+    preserved_worktree: str = ""
+    message: str = ""
+    error: str | None = None
+    error_kind: str = ""  # "ownership", "capability", "concurrency", "security", "runtime"
+    exit_code: int = 0
+    app_service: str = ""
+    db_service: str = ""
+    publish_db: bool = False
+    dedicated_volume: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        res: dict[str, Any] = {
+            "schema_version": "1.0",
+            "tool_version": get_package_version(),
+            "success": self.success,
+            "environment": self.environment,
+        }
+        if not self.success:
+            res["error"] = self.error or "Operation failed"
+            if self.compose_project:
+                res["compose_project"] = self.compose_project
+            if self.preserved_worktree:
+                res["preserved_worktree"] = self.preserved_worktree
+            return res
+
+        if self.compose_project:
+            res["compose_project"] = self.compose_project
+        if self.worktree_path:
+            res["worktree_path"] = self.worktree_path
+        if self.status:
+            res["status"] = self.status
+        if self.health:
+            res["health"] = self.health
+        if self.app_port is not None:
+            res["app_port"] = self.app_port
+        if self.host_port is not None:
+            res["host_port"] = self.host_port
+        if self.url:
+            res["url"] = self.url
+        if self.already_running:
+            res["already_running"] = True
+        if self.volume_preserved:
+            res["volume_preserved"] = self.volume_preserved
+        if self.message:
+            res["message"] = self.message
+        if self.containers:
+            res["containers"] = [
+                {
+                    "name": c.get("Name"),
+                    "service": c.get("Service"),
+                    "state": c.get("State"),
+                    "health": _evaluate_container_health(c),
+                }
+                for c in self.containers
+            ]
+        return res
 
 MAX_PORT_START_RETRIES = 3
 DEFAULT_UP_TIMEOUT = 60.0
@@ -274,46 +398,37 @@ def _write_runtime_state(
     return state_file
 
 
-def execute_up(
+def start_environment(
     env_name: str,
     repo_hint: str | Path | None = None,
-    output_json: bool = False,
     timeout: float = DEFAULT_UP_TIMEOUT,
-) -> int:
-    """Implements `isolation-check up <environment>`."""
+) -> LifecycleActionResult:
+    """Starts a managed environment's Docker Compose project and returns a structured result."""
     # 1. Ownership and path validation
     try:
         rec_file, rec_data, manifest_file, manifest_data = locate_and_validate_environment(
             repo_hint, env_name
         )
     except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Ownership / Validation Error: {exc}\n")
-        return 2
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            error_kind="ownership",
+            exit_code=2,
+        )
 
     # 2. Check Docker Compose capabilities
     try:
         verify_compose_capabilities()
     except ComposeCapabilityError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Docker Compose Capability Error: {exc}\n")
-        return 2
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            error_kind="capability",
+            exit_code=2,
+        )
 
     worktree_path = Path(rec_data["worktree_path"]).resolve()
     repo_root = rec_file.parent.parent.parent
@@ -323,14 +438,14 @@ def execute_up(
     env_rel_path = manifest_data["compose"]["env_file"]
 
     db_info = manifest_data.get("database", {})
-    db_service = db_info.get("service_name")
-    dedicated_volume = db_info.get("volume_name")
+    db_service = db_info.get("service_name", "")
+    dedicated_volume = db_info.get("volume_name", "")
     publish_db = bool(db_info.get("host_ports_published", False))
 
     app_info = manifest_data.get("application", {})
-    app_service = app_info.get("service_name")
+    app_service = app_info.get("service_name", "")
     app_port = int(app_info.get("app_port"))
-    db_env_var = app_info.get("database_env_var")
+    db_env_var = app_info.get("database_env_var", "")
 
     # Read unredacted database URL from private env file
     env_file = worktree_path / env_rel_path
@@ -351,51 +466,35 @@ def execute_up(
                     worktree_path, project_name, base_compose_files, override_rel_path
                 )
             except OwnershipError as exc:
-                if output_json:
-                    print(json.dumps({"success": False, "error": str(exc)}, indent=2))
-                else:
-                    sys.stderr.write(f"Security Error: {exc}\n")
-                return 2
+                return LifecycleActionResult(
+                    success=False,
+                    environment=env_name,
+                    error=str(exc),
+                    error_kind="security",
+                    exit_code=2,
+                )
 
             overall_state, overall_health = _evaluate_overall_status(existing_containers)
             if overall_state == "RUNNING":
                 pub_port, pub_url = _extract_app_published_port(existing_containers, app_service, app_port)
-                if output_json:
-                    print(json.dumps({
-                        "schema_version": "1.0",
-                        "tool_version": get_package_version(),
-                        "success": True,
-                        "environment": env_name,
-                        "compose_project": project_name,
-                        "worktree_path": str(worktree_path),
-                        "status": "RUNNING",
-                        "health": overall_health,
-                        "app_port": app_port,
-                        "host_port": pub_port,
-                        "url": pub_url,
-                        "already_running": True,
-                        "containers": [
-                            {
-                                "name": c.get("Name"),
-                                "service": c.get("Service"),
-                                "state": c.get("State"),
-                                "health": _evaluate_container_health(c),
-                            }
-                            for c in existing_containers
-                        ],
-                    }, indent=2))
-                else:
-                    print("========================================================================")
-                    print("isolation-check up -- ENVIRONMENT RUNNING (ALREADY ACTIVE)")
-                    print(f"Environment: {env_name}")
-                    print(f"Project:     {project_name}")
-                    print(f"Worktree:    {worktree_path}")
-                    if pub_url:
-                        print(f"Application URL: {pub_url} (Loopback 127.0.0.1:{pub_port} -> container :{app_port})")
-                    print(f"State:       RUNNING")
-                    print(f"Health:      {overall_health}")
-                    print("========================================================================")
-                return 0
+                return LifecycleActionResult(
+                    success=True,
+                    environment=env_name,
+                    compose_project=project_name,
+                    worktree_path=str(worktree_path),
+                    status="RUNNING",
+                    health=overall_health,
+                    app_port=app_port,
+                    host_port=pub_port,
+                    url=pub_url,
+                    already_running=True,
+                    containers=existing_containers,
+                    app_service=app_service,
+                    db_service=db_service,
+                    publish_db=publish_db,
+                    dedicated_volume=dedicated_volume,
+                    exit_code=0,
+                )
 
             # 4. Port allocation with bounded retry for check-to-bind race conflicts
             attempt = 0
@@ -458,37 +557,25 @@ def execute_up(
                     stderr = str(exc)
 
                 if code == 0:
-                    # Startup succeeded!
                     break
 
                 last_error = stderr.strip() or stdout.strip() or f"Exited with code {code}"
-                # If candidate failed to bind, release transient reservation for that candidate
                 if candidate_host_port is not None:
                     release_port_reservation(repo_root, env_name, candidate_host_port)
 
-                # Retry only if error is an identified host-port binding conflict
                 if is_port_binding_conflict(last_error) and attempt < MAX_PORT_START_RETRIES:
                     continue
                 else:
-                    # Non-port error or exceeded retries: release all reservations, preserve environment and report failure
                     release_port_reservation(repo_root, env_name)
-                    if output_json:
-                        print(json.dumps({
-                            "schema_version": "1.0",
-                            "tool_version": get_package_version(),
-                            "success": False,
-                            "environment": env_name,
-                            "compose_project": project_name,
-                            "error": last_error,
-                            "preserved_worktree": str(worktree_path),
-                        }, indent=2))
-                    else:
-                        sys.stderr.write(f"\nError: Failed to start environment '{env_name}': {last_error}\n")
-                        sys.stderr.write(
-                            f"The environment and generated files at {worktree_path} have been preserved.\n"
-                            f"To inspect or diagnose: cd {worktree_path} && docker compose ps\n"
-                        )
-                    return 1
+                    return LifecycleActionResult(
+                        success=False,
+                        environment=env_name,
+                        compose_project=project_name,
+                        error=last_error,
+                        preserved_worktree=str(worktree_path),
+                        error_kind="runtime",
+                        exit_code=1,
+                    )
 
             # 5. Inspect Docker state post-startup
             post_containers = _inspect_compose_containers(
@@ -525,80 +612,140 @@ def execute_up(
             }
             _write_runtime_state(worktree_path, runtime_data)
 
-            # 7. Format output
-            if output_json:
-                out = {
-                    "schema_version": "1.0",
-                    "tool_version": get_package_version(),
-                    "success": True,
-                    "environment": env_name,
-                    "compose_project": project_name,
-                    "worktree_path": str(worktree_path),
-                    "status": overall_state,
-                    "health": overall_health,
-                    "app_port": app_port,
-                    "host_port": actual_port,
-                    "url": app_url,
-                    "containers": runtime_data["containers"],
-                }
-                print(json.dumps(out, indent=2))
-            else:
-                print("========================================================================")
-                print("isolation-check up -- ENVIRONMENT STARTED")
-                print(f"Environment: {env_name}")
-                print(f"Project:     {project_name}")
-                print(f"Worktree:    {worktree_path}")
-                print()
-                print(f"Application: {app_service} running at {app_url}")
-                print(f"             (Loopback 127.0.0.1:{actual_port} -> container :{app_port})")
-                if publish_db:
-                    print(f"Database:    {db_service} (Host publishing ENABLED)")
-                else:
-                    print(f"Database:    {db_service} (Internal container network only, host unpublished)")
-                print(f"Volume:      {dedicated_volume}")
-                print()
-                print(f"State:       {overall_state}")
-                print(f"Health:      {overall_health}")
-                print("========================================================================")
+            return LifecycleActionResult(
+                success=True,
+                environment=env_name,
+                compose_project=project_name,
+                worktree_path=str(worktree_path),
+                status=overall_state,
+                health=overall_health,
+                app_port=app_port,
+                host_port=actual_port,
+                url=app_url,
+                containers=post_containers,
+                app_service=app_service,
+                db_service=db_service,
+                publish_db=publish_db,
+                dedicated_volume=dedicated_volume,
+                exit_code=0,
+            )
 
-            return 0
     except ConcurrencyLockError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Concurrency Error: {exc}\n")
-        return 2
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            error_kind="concurrency",
+            exit_code=2,
+        )
 
 
-def execute_status(
+def execute_up(
     env_name: str,
     repo_hint: str | Path | None = None,
     output_json: bool = False,
-    timeout: float = DEFAULT_STATUS_TIMEOUT,
+    timeout: float = DEFAULT_UP_TIMEOUT,
 ) -> int:
-    """Implements `isolation-check status <environment>` (read-only)."""
+    """Implements `isolation-check up <environment>`."""
+    result = start_environment(env_name, repo_hint, timeout)
+    if not result.success:
+        if output_json:
+            print(json.dumps(result.to_dict(), indent=2))
+        else:
+            if result.error_kind == "ownership":
+                sys.stderr.write(f"Ownership / Validation Error: {result.error}\n")
+            elif result.error_kind == "capability":
+                sys.stderr.write(f"Docker Compose Capability Error: {result.error}\n")
+            elif result.error_kind == "concurrency":
+                sys.stderr.write(f"Concurrency Error: {result.error}\n")
+            elif result.error_kind == "security":
+                sys.stderr.write(f"Security Error: {result.error}\n")
+            else:
+                sys.stderr.write(f"\nError: Failed to start environment '{env_name}': {result.error}\n")
+                if result.preserved_worktree:
+                    sys.stderr.write(
+                        f"The environment and generated files at {result.preserved_worktree} have been preserved.\n"
+                        f"To inspect or diagnose: cd {result.preserved_worktree} && docker compose ps\n"
+                    )
+        return result.exit_code
+
+    if output_json:
+        out = {
+            "schema_version": "1.0",
+            "tool_version": get_package_version(),
+            "success": True,
+            "environment": env_name,
+            "compose_project": result.compose_project,
+            "worktree_path": result.worktree_path,
+            "status": result.status,
+            "health": result.health,
+            "app_port": result.app_port,
+            "host_port": result.host_port,
+            "url": result.url,
+            "containers": [
+                {
+                    "name": c.get("Name"),
+                    "service": c.get("Service"),
+                    "state": c.get("State"),
+                    "health": _evaluate_container_health(c),
+                }
+                for c in result.containers
+            ],
+        }
+        if result.already_running:
+            out["already_running"] = True
+        print(json.dumps(out, indent=2))
+    else:
+        if result.already_running:
+            print("========================================================================")
+            print("isolation-check up -- ENVIRONMENT RUNNING (ALREADY ACTIVE)")
+            print(f"Environment: {env_name}")
+            print(f"Project:     {result.compose_project}")
+            print(f"Worktree:    {result.worktree_path}")
+            if result.url:
+                print(f"Application URL: {result.url} (Loopback 127.0.0.1:{result.host_port} -> container :{result.app_port})")
+            print(f"State:       RUNNING")
+            print(f"Health:      {result.health}")
+            print("========================================================================")
+        else:
+            print("========================================================================")
+            print("isolation-check up -- ENVIRONMENT STARTED")
+            print(f"Environment: {env_name}")
+            print(f"Project:     {result.compose_project}")
+            print(f"Worktree:    {result.worktree_path}")
+            print()
+            print(f"Application: {result.app_service} running at {result.url}")
+            print(f"             (Loopback 127.0.0.1:{result.host_port} -> container :{result.app_port})")
+            if result.publish_db:
+                print(f"Database:    {result.db_service} (Host publishing ENABLED)")
+            else:
+                print(f"Database:    {result.db_service} (Internal container network only, host unpublished)")
+            print(f"Volume:      {result.dedicated_volume}")
+            print()
+            print(f"State:       {result.status}")
+            print(f"Health:      {result.health}")
+            print("========================================================================")
+
+    return 0
+
+
+def query_environment_status(
+    env_name: str,
+    repo_hint: str | Path | None = None,
+    timeout: float = DEFAULT_STATUS_TIMEOUT,
+) -> EnvironmentStatusResult:
+    """Queries runtime state and health of a managed environment (read-only)."""
     try:
         rec_file, rec_data, manifest_file, manifest_data = locate_and_validate_environment(
             repo_hint, env_name
         )
     except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Ownership / Validation Error: {exc}\n")
-        return 2
+        return EnvironmentStatusResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            exit_code=2,
+        )
 
     worktree_path = Path(rec_data["worktree_path"]).resolve()
     project_name = rec_data["compose_project_name"]
@@ -606,8 +753,8 @@ def execute_status(
     override_rel_path = manifest_data["compose"]["override_file"]
 
     app_info = manifest_data.get("application", {})
-    app_service = app_info.get("service_name")
-    app_port = int(app_info.get("app_port"))
+    app_service = app_info.get("service_name", "")
+    app_port = int(app_info.get("app_port", 0))
 
     # Load stored runtime state if present
     stored_state_file = worktree_path / ".isolation-check" / "runtime-state.json"
@@ -624,11 +771,14 @@ def execute_status(
             worktree_path, project_name, base_compose_files, override_rel_path, timeout
         )
     except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({"success": False, "error": str(exc)}, indent=2))
-        else:
-            sys.stderr.write(f"Security Error: {exc}\n")
-        return 2
+        return EnvironmentStatusResult(
+            success=False,
+            environment=env_name,
+            compose_project=project_name,
+            worktree_path=str(worktree_path),
+            error=str(exc),
+            exit_code=2,
+        )
 
     overall_state, overall_health = _evaluate_overall_status(containers)
     actual_port, app_url = _extract_app_published_port(containers, app_service, app_port)
@@ -639,55 +789,68 @@ def execute_status(
         is_stale = True
 
     if overall_state != "RUNNING":
-        # Never present stale URL when containers are stopped
         app_url = None
         actual_port = None
 
+    return EnvironmentStatusResult(
+        success=True,
+        environment=env_name,
+        compose_project=project_name,
+        worktree_path=str(worktree_path),
+        status=overall_state,
+        health=overall_health,
+        app_target_port=app_port,
+        host_port=actual_port,
+        url=app_url,
+        ownership_verified=True,
+        stale_runtime_state=is_stale,
+        containers=containers,
+        exit_code=0,
+    )
+
+
+def execute_status(
+    env_name: str,
+    repo_hint: str | Path | None = None,
+    output_json: bool = False,
+    timeout: float = DEFAULT_STATUS_TIMEOUT,
+) -> int:
+    """Implements `isolation-check status <environment>` (read-only)."""
+    result = query_environment_status(env_name, repo_hint, timeout)
+    if not result.success:
+        if output_json:
+            print(json.dumps(result.to_dict(), indent=2))
+        else:
+            if "Ownership" in (result.error or "") or "Validation" in (result.error or ""):
+                sys.stderr.write(f"Ownership / Validation Error: {result.error}\n")
+            elif "Security" in (result.error or ""):
+                sys.stderr.write(f"Security Error: {result.error}\n")
+            else:
+                sys.stderr.write(f"Status Error: {result.error}\n")
+        return result.exit_code
+
     if output_json:
-        data = {
-            "schema_version": "1.0",
-            "tool_version": get_package_version(),
-            "environment": env_name,
-            "compose_project": project_name,
-            "worktree_path": str(worktree_path),
-            "status": overall_state,
-            "health": overall_health,
-            "app_target_port": app_port,
-            "host_port": actual_port,
-            "url": app_url,
-            "ownership_verified": True,
-            "stale_runtime_state": is_stale,
-            "containers": [
-                {
-                    "name": c.get("Name"),
-                    "service": c.get("Service"),
-                    "state": c.get("State"),
-                    "health": _evaluate_container_health(c),
-                }
-                for c in containers
-            ],
-        }
-        print(json.dumps(data, indent=2))
+        print(json.dumps(result.to_dict(), indent=2))
     else:
         print("========================================================================")
         print("isolation-check status -- ENVIRONMENT STATUS")
         print(f"Environment: {env_name}")
-        print(f"Project:     {project_name}")
-        print(f"Worktree:    {worktree_path}")
-        print(f"Ownership:   VERIFIED (managed by isolation-check)")
+        print(f"Project:     {result.compose_project}")
+        print(f"Worktree:    {result.worktree_path}")
+        print("Ownership:   VERIFIED (managed by isolation-check)")
         print()
-        print(f"Status:      {overall_state}")
-        print(f"Health:      {overall_health}")
-        if is_stale:
+        print(f"Status:      {result.status}")
+        print(f"Health:      {result.health}")
+        if result.stale_runtime_state:
             print("Notice:      Stored runtime state is STALE (containers have stopped).")
-        if app_url:
-            print(f"URL:         {app_url} (Loopback 127.0.0.1:{actual_port} -> container :{app_port})")
+        if result.url:
+            print(f"URL:         {result.url} (Loopback 127.0.0.1:{result.host_port} -> container :{result.app_target_port})")
         else:
-            print(f"URL:         Not available (environment is {overall_state})")
+            print(f"URL:         Not available (environment is {result.status})")
         print()
-        if containers:
+        if result.containers:
             print("Services:")
-            for c in containers:
+            for c in result.containers:
                 svc = c.get("Service", "unknown")
                 st = c.get("State", "unknown")
                 hl = _evaluate_container_health(c)
@@ -699,35 +862,34 @@ def execute_status(
     return 0
 
 
-def execute_down(
+def stop_environment(
     env_name: str,
     repo_hint: str | Path | None = None,
-    output_json: bool = False,
     timeout: float = DEFAULT_DOWN_TIMEOUT,
     destructive: bool = False,
-) -> int:
-    """Implements non-destructive `isolation-check down <environment>`."""
+) -> LifecycleActionResult:
+    """Stops a managed environment's Docker Compose project while preserving data."""
     if destructive:
-        sys.stderr.write("Error: Destructive flags are not supported in isolation-check down.\n")
-        sys.stderr.write("Data volumes are strictly preserved. Teardown/destroy is planned for a future milestone.\n")
-        return 2
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error="Destructive flags are not supported in isolation-check down. Data volumes are strictly preserved.",
+            error_kind="validation",
+            exit_code=2,
+        )
 
     try:
         rec_file, rec_data, manifest_file, manifest_data = locate_and_validate_environment(
             repo_hint, env_name
         )
     except OwnershipError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Ownership / Validation Error: {exc}\n")
-        return 2
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            error_kind="ownership",
+            exit_code=2,
+        )
 
     worktree_path = Path(rec_data["worktree_path"]).resolve()
     project_name = rec_data["compose_project_name"]
@@ -745,15 +907,16 @@ def execute_down(
                     worktree_path, project_name, base_compose_files, override_rel_path
                 )
             except OwnershipError as exc:
-                if output_json:
-                    print(json.dumps({"success": False, "error": str(exc)}, indent=2))
-                else:
-                    sys.stderr.write(f"Security Error: {exc}\n")
-                return 2
+                return LifecycleActionResult(
+                    success=False,
+                    environment=env_name,
+                    error=str(exc),
+                    error_kind="security",
+                    exit_code=2,
+                )
 
             if not containers:
                 release_port_reservation(rec_file.parent.parent.parent, env_name)
-                # Mark runtime state as stopped
                 state_file = worktree_path / ".isolation-check" / "runtime-state.json"
                 if state_file.is_file():
                     try:
@@ -764,21 +927,16 @@ def execute_down(
                     except Exception:
                         pass
 
-                if output_json:
-                    print(json.dumps({
-                        "schema_version": "1.0",
-                        "tool_version": get_package_version(),
-                        "success": True,
-                        "environment": env_name,
-                        "compose_project": project_name,
-                        "status": "STOPPED",
-                        "message": "Environment is already stopped.",
-                        "volume_preserved": dedicated_volume,
-                    }, indent=2))
-                else:
-                    print(f"Environment '{env_name}' (project '{project_name}') is already stopped.")
-                    print(f"Dedicated volume '{dedicated_volume}' and worktree were preserved.")
-                return 0
+                return LifecycleActionResult(
+                    success=True,
+                    environment=env_name,
+                    compose_project=project_name,
+                    worktree_path=str(worktree_path),
+                    status="STOPPED",
+                    message="Environment is already stopped.",
+                    volume_preserved=dedicated_volume,
+                    exit_code=0,
+                )
 
             # Execute docker compose down WITHOUT -v / --volumes
             cmd = [
@@ -798,21 +956,17 @@ def execute_down(
             code, stdout, stderr = _run_compose_cmd(cmd, worktree_path, timeout)
             if code != 0:
                 err = stderr.strip() or stdout.strip() or f"Exited with code {code}"
-                if output_json:
-                    print(json.dumps({
-                        "schema_version": "1.0",
-                        "tool_version": get_package_version(),
-                        "success": False,
-                        "environment": env_name,
-                        "error": err,
-                    }, indent=2))
-                else:
-                    sys.stderr.write(f"Error: Failed to stop environment '{env_name}': {err}\n")
-                return 1
+                return LifecycleActionResult(
+                    success=False,
+                    environment=env_name,
+                    compose_project=project_name,
+                    error=err,
+                    error_kind="runtime",
+                    exit_code=1,
+                )
 
             release_port_reservation(rec_file.parent.parent.parent, env_name)
 
-            # Mark runtime state as stopped
             state_file = worktree_path / ".isolation-check" / "runtime-state.json"
             if state_file.is_file():
                 try:
@@ -823,36 +977,78 @@ def execute_down(
                 except Exception:
                     pass
 
-            if output_json:
-                print(json.dumps({
-                    "schema_version": "1.0",
-                    "tool_version": get_package_version(),
-                    "success": True,
-                    "environment": env_name,
-                    "compose_project": project_name,
-                    "status": "STOPPED",
-                    "volume_preserved": dedicated_volume,
-                }, indent=2))
-            else:
-                print("========================================================================")
-                print("isolation-check down -- ENVIRONMENT STOPPED")
-                print(f"Environment: {env_name}")
-                print(f"Project:     {project_name}")
-                print(f"Status:      STOPPED")
-                print(f"Storage:     Dedicated volume '{dedicated_volume}' was PRESERVED.")
-                print(f"Worktree:    {worktree_path} was PRESERVED.")
-                print("========================================================================")
-
-            return 0
+            return LifecycleActionResult(
+                success=True,
+                environment=env_name,
+                compose_project=project_name,
+                worktree_path=str(worktree_path),
+                status="STOPPED",
+                volume_preserved=dedicated_volume,
+                exit_code=0,
+            )
     except ConcurrencyLockError as exc:
-        if output_json:
-            print(json.dumps({
-                "schema_version": "1.0",
-                "tool_version": get_package_version(),
-                "success": False,
-                "environment": env_name,
-                "error": str(exc),
-            }, indent=2))
-        else:
-            sys.stderr.write(f"Concurrency Error: {exc}\n")
+        return LifecycleActionResult(
+            success=False,
+            environment=env_name,
+            error=str(exc),
+            error_kind="concurrency",
+            exit_code=2,
+        )
+
+
+def execute_down(
+    env_name: str,
+    repo_hint: str | Path | None = None,
+    output_json: bool = False,
+    timeout: float = DEFAULT_DOWN_TIMEOUT,
+    destructive: bool = False,
+) -> int:
+    """Implements non-destructive `isolation-check down <environment>`."""
+    if destructive:
+        sys.stderr.write("Error: Destructive flags are not supported in isolation-check down.\n")
+        sys.stderr.write("Data volumes are strictly preserved. Teardown/destroy is planned for a future milestone.\n")
         return 2
+
+    result = stop_environment(env_name, repo_hint, timeout, destructive)
+    if not result.success:
+        if output_json:
+            print(json.dumps(result.to_dict(), indent=2))
+        else:
+            if result.error_kind == "ownership":
+                sys.stderr.write(f"Ownership / Validation Error: {result.error}\n")
+            elif result.error_kind == "security":
+                sys.stderr.write(f"Security Error: {result.error}\n")
+            elif result.error_kind == "concurrency":
+                sys.stderr.write(f"Concurrency Error: {result.error}\n")
+            else:
+                sys.stderr.write(f"Error: Failed to stop environment '{env_name}': {result.error}\n")
+        return result.exit_code
+
+    if output_json:
+        out = {
+            "schema_version": "1.0",
+            "tool_version": get_package_version(),
+            "success": True,
+            "environment": env_name,
+            "compose_project": result.compose_project,
+            "status": "STOPPED",
+            "volume_preserved": result.volume_preserved,
+        }
+        if result.message:
+            out["message"] = result.message
+        print(json.dumps(out, indent=2))
+    else:
+        if result.message:
+            print(f"Environment '{env_name}' (project '{result.compose_project}') is already stopped.")
+            print(f"Dedicated volume '{result.volume_preserved}' and worktree were preserved.")
+        else:
+            print("========================================================================")
+            print("isolation-check down -- ENVIRONMENT STOPPED")
+            print(f"Environment: {env_name}")
+            print(f"Project:     {result.compose_project}")
+            print(f"Status:      STOPPED")
+            print(f"Storage:     Dedicated volume '{result.volume_preserved}' was PRESERVED.")
+            print(f"Worktree:    {result.worktree_path} was PRESERVED.")
+            print("========================================================================")
+
+    return 0

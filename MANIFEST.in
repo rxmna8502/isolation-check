@@ -1,5 +1,5 @@
 include README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md SUPPORT.md pyproject.toml
-recursive-include src/isolation_check *.py py.typed
+recursive-include src/isolation_check *.py py.typed *.tcss
 recursive-include examples *
 recursive-include tests *.py *.json *.yaml *.yml
 global-exclude *.py[cod] __pycache__ *.so *.dylib *.zip

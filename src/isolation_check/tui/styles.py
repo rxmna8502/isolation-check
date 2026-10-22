@@ -1,0 +1,348 @@
+"""Styling rules and TCSS definitions for the isolation-check TUI."""
+from __future__ import annotations
+
+APP_CSS = """
+/* Palette Variables */
+$surface: #1e1e2e;
+$panel: #282a36;
+$primary: #6272a4;
+$primary-darken-1: #44475a;
+$primary-darken-2: #343746;
+$accent: #8be9fd;
+$text: #f8f8f2;
+$text-muted: #9aa5ce;
+$success: #50fa7b;
+$warning: #f1fa8c;
+$error: #ff5555;
+
+/* Global Application Styles */
+Screen {
+    background: $surface;
+    color: $text;
+}
+
+#header-container {
+    dock: top;
+    height: 3;
+    background: $panel;
+    color: $text;
+    padding: 0 1;
+    border-bottom: heavy $primary;
+}
+
+#header-title {
+    text-style: bold;
+    color: $accent;
+    width: 1fr;
+    content-align: left middle;
+}
+
+#header-status {
+    width: auto;
+    color: $text-muted;
+    content-align: right middle;
+}
+
+#footer-hints {
+    dock: bottom;
+    height: 1;
+    background: $panel;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+/* Scrollable Container */
+.screen-scroll, .main-scroll {
+    height: 1fr;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+.section-title, .screen-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 0;
+}
+
+.section-subtitle, .screen-desc {
+    color: $text-muted;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+/* Home Menu Styles */
+#menu-list {
+    width: 100%;
+    max-width: 80;
+    margin: 1 0;
+    border: round $primary;
+    background: $panel;
+    padding: 1;
+}
+
+.menu-item {
+    padding: 1 2;
+    margin: 0 0 1 0;
+    background: $surface;
+    color: $text;
+    border: tall transparent;
+}
+
+.menu-item:hover {
+    background: $primary-darken-1;
+    color: $text;
+}
+
+.menu-item:focus {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+    border: tall $accent;
+}
+
+.menu-item-title {
+    text-style: bold;
+}
+
+.menu-item-desc {
+    color: $text-muted;
+}
+
+/* Card & Panel Styles */
+.card {
+    background: $panel;
+    border: round $primary;
+    padding: 1 2;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.card-header, .card-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+/* Form Styles */
+.form-row {
+    margin-bottom: 1;
+}
+
+.form-label {
+    text-style: bold;
+    margin-bottom: 0;
+    color: $text;
+}
+
+.form-help {
+    color: $text-muted;
+    margin-bottom: 0;
+}
+
+.form-input {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.field-error {
+    color: $error;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Button & Action Rows */
+.action-row, .button-row {
+    margin-top: 1;
+    margin-bottom: 1;
+    height: auto;
+    align-horizontal: left;
+}
+
+.action-row Button, .button-row Button {
+    margin-right: 1;
+}
+
+.mt-1 {
+    margin-top: 1;
+}
+
+.text-muted {
+    color: $text-muted;
+}
+
+/* Status Badges */
+.badge-pass {
+    background: $success;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-warn {
+    background: $warning;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-fail {
+    background: $error;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-unknown {
+    background: $primary-darken-2;
+    color: $text-muted;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-info {
+    background: $accent;
+    color: $text;
+    padding: 0 1;
+}
+
+/* Modals */
+ModalScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.modal-dialog {
+    width: 80%;
+    max-width: 90;
+    height: auto;
+    max-height: 85%;
+    background: $panel;
+    border: thick $primary;
+    padding: 1 2;
+}
+
+.modal-title {
+    text-style: bold;
+    color: $accent;
+    border-bottom: solid $primary;
+    margin-bottom: 1;
+}
+
+.modal-body {
+    height: auto;
+    max-height: 25;
+    overflow-y: auto;
+    margin-bottom: 1;
+}
+
+/* Data Table */
+DataTable {
+    height: auto;
+    max-height: 20;
+    margin: 1 0;
+    border: solid $primary;
+}
+
+/* Monospace & Code Preview Blocks */
+.monospace-box, .code-preview {
+    background: $surface;
+    border: dashed $primary;
+    padding: 1;
+    height: auto;
+    max-height: 18;
+    overflow-y: auto;
+    margin: 1 0;
+}
+
+LoadingIndicator {
+    height: 3;
+    margin: 1 0;
+}
+
+/* Centered, width-limited responsive wizard */
+.wizard-scroll {
+    height: 1fr;
+    align: center top;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+.wizard-container {
+    width: 100%;
+    max-width: 86;
+    height: auto;
+}
+
+.wizard-progress {
+    background: $panel;
+    border: round $primary;
+    padding: 1;
+    margin-bottom: 1;
+    text-align: center;
+    content-align: center middle;
+    height: auto;
+}
+
+.wizard-step-card {
+    background: $panel;
+    border: round $primary;
+    padding: 1 2;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.wizard-step-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 0;
+}
+
+.wizard-nav-row {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+.wizard-nav-row Button {
+    margin-left: 1;
+}
+
+.details-box {
+    background: $surface;
+    border: dashed $primary;
+    padding: 1;
+    height: auto;
+    max-height: 12;
+    overflow-y: auto;
+    margin: 1 0;
+}
+
+/* Bounded dropdowns with scrolling and accessible hints */
+Select {
+    margin-bottom: 1;
+}
+
+SelectOverlay {
+    max-height: 8;
+    overflow-y: auto;
+    border: round $accent;
+    background: $panel;
+}
+
+.keyboard-hint {
+    color: $text-muted;
+    text-align: center;
+    margin: 1 0;
+}
+"""
+
+from pathlib import Path as _Path
+_TCSS_FILE = _Path(__file__).parent / "app.tcss"
+if _TCSS_FILE.is_file():
+    try:
+        APP_CSS = _TCSS_FILE.read_text(encoding="utf-8")
+    except Exception:
+        pass

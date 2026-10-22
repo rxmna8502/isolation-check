@@ -32,7 +32,10 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
 ]
-dependencies = []
+dependencies = [
+    "textual>=0.80.0",
+    "packaging>=23.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -54,4 +57,4 @@ Documentation = "https://github.com/rxmna8502/isolation-check#readme"
 where = ["src"]
 
 [tool.setuptools.package-data]
-isolation_check = ["py.typed"]
+isolation_check = ["py.typed", "**/*.tcss"]

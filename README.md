@@ -64,10 +64,40 @@ pip install .
 ### Verify Installation
 ```bash
 isolation-check --version
-# Expected output: isolation-check 0.3.0a1
+# Expected output: isolation-check 0.3.0a2
 
 isolation-check --help
 ```
+
+---
+
+## Interactive Terminal User Interface (TUI)
+
+Running `isolation-check` with no arguments in an interactive terminal opens the full keyboard-driven TUI experience:
+
+```bash
+isolation-check
+```
+
+### Keyboard Navigation
+- **Arrow Keys (`Up` / `Down`)**: Navigate menu items, lists, and form fields.
+- **`Enter`**: Select menu option, toggle controls, or confirm actions.
+- **`Escape`**: Return to the previous screen or dismiss dialogs.
+- **Number keys (`1` - `8`)**: Jump directly to Home menu items.
+- **`q`**: Quit the application safely.
+
+### TUI Workflows
+1. **Get started**: A 7-step wizard that resolves your Git repository, tests prerequisites, inspects Compose files and service ports, and previews the proposed `isolation-check.toml` before writing.
+2. **Create an environment**: A dedicated creation form enforcing dry-run validation first, displaying the calculated plan and loopback port bindings, redacting passwords, and requiring explicit confirmation before creating the Git worktree.
+3. **Manage environments**: Lists registered environments with observed Docker state, application URL, and container health. Provides detailed inspection, non-destructive start (`up`), and stop (`down` with confirmation confirming named volumes and database records are preserved).
+4. **Check for collisions**: Audits two Compose directories or files, rendering structured findings (`VOL001`, `PORT001`, `COVERAGE`) with distinct PASS, WARN, FAIL, and UNKNOWN badges and audit scope disclaimers.
+5. **Check prerequisites**: Bounded read-only checks for Python, Git CLI, Docker CLI, Docker daemon connectivity, and Compose capability tags (`!override`/`!reset`) with actionable repair instructions.
+6. **Check for updates**: Explicit on-demand query to PyPI metadata over HTTPS using PEP 440 version parsing. Shows current vs latest version, prerelease explanations, offline tolerance, and safe upgrade commands for `pip`, `pipx`, and `uv`.
+7. **Help**: Documentation of the lifecycle workflow (`create → up → status → down`), safety rules, and direct CLI command syntax.
+8. **Exit**: Clean exit from the TUI.
+
+### Non-Interactive & CI Execution
+When executed without a TTY or in a non-interactive pipe/script, `isolation-check` prints standard CLI help and exits with status code `0` without hanging or launching the TUI.
 
 ---
 

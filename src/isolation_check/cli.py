@@ -20,15 +20,8 @@ from isolation_check.rules.volumes import check_volumes
 from isolation_check.version import get_package_version
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    raw_args = list(argv if argv is not None else sys.argv[1:])
-
-    # Default to 'check' subcommand if running `isolation-check <left> <right>` directly
-    if raw_args and not raw_args[0].startswith("-") and raw_args[0] not in (
-        "check", "create", "up", "status", "down", "help"
-    ):
-        raw_args.insert(0, "check")
-
+def build_parser() -> argparse.ArgumentParser:
+    """Builds and returns the top-level argument parser for isolation-check."""
     parser = argparse.ArgumentParser(
         prog="isolation-check",
         description="Inspect and prepare isolated local development environments.",
@@ -216,7 +209,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Output result as structured JSON.",
     )
 
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+
+    # Default to 'check' subcommand if running `isolation-check <left> <right>` directly
+    if raw_args and not raw_args[0].startswith("-") and raw_args[0] not in (
+        "check", "create", "up", "status", "down", "help"
+    ):
+        raw_args.insert(0, "check")
+
+    parser = build_parser()
     return parser.parse_args(raw_args)
+
+
+def is_interactive() -> bool:
+    """Returns True if standard input and output are attached to an interactive TTY."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
 
 
 def _load_env_config(path_str: str) -> tuple[dict, str, str]:
@@ -245,7 +259,17 @@ def _load_env_config(path_str: str) -> tuple[dict, str, str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+    if not raw_args:
+        if is_interactive():
+            from isolation_check.tui import run_tui
+            return run_tui()
+        else:
+            parser = build_parser()
+            parser.print_help()
+            return 0
+
+    args = parse_args(raw_args)
 
     if args.command == "up":
         from isolation_check.runtime.lifecycle import execute_up

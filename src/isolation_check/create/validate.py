@@ -21,6 +21,114 @@ class ValidationError(Exception):
     """Raised when environment creation validation fails."""
 
 
+SUPPORTED_POSTGRES_REPOSITORIES: tuple[str, ...] = ("postgres",)
+
+
+def extract_image_repository(image: str | None) -> str:
+    """Extracts the normalized OCI image repository identity (excluding tags and digests).
+
+    Strips registry host/port (if docker.io/library), tags, and digests.
+    Examples:
+        'postgres:15-alpine' -> 'postgres'
+        'docker.io/library/postgres:16' -> 'postgres'
+        'library/postgres:latest' -> 'postgres'
+        'postgis/postgis:15-3.3' -> 'postgis/postgis'
+        'timescale/timescaledb:latest-pg15' -> 'timescale/timescaledb'
+        'crunchydata/crunchy-postgres:ubi8-15.2-0' -> 'crunchydata/crunchy-postgres'
+        'postgres-custom:latest' -> 'postgres-custom'
+    """
+    if not image:
+        return ""
+    img = image.strip().split("@")[0]
+    segments = img.split("/")
+    last_seg = segments[-1]
+    if ":" in last_seg:
+        segments[-1] = last_seg.split(":", 1)[0]
+    repo = "/".join(segments)
+
+    # Normalize standard Docker Hub library prefixes
+    if repo.startswith("docker.io/library/"):
+        repo = repo[len("docker.io/library/"):]
+    elif repo.startswith("docker.io/"):
+        repo = repo[len("docker.io/"):]
+    elif repo.startswith("library/"):
+        repo = repo[len("library/"):]
+    return repo.lower()
+
+
+def is_supported_postgres_image(image: str | None) -> bool:
+    """Checks whether an image corresponds to an explicitly tested and supported official PostgreSQL repository."""
+    if not image:
+        return False
+    repo = extract_image_repository(image)
+    return repo in SUPPORTED_POSTGRES_REPOSITORIES
+
+
+def validate_postgres_service_definition(service_name: str, service_cfg: dict[str, Any]) -> str | None:
+    """Validates that a service definition satisfies backend PostgreSQL requirements.
+
+    Returns:
+        None if valid, or a descriptive error string if unsupported.
+    """
+    if not isinstance(service_cfg, dict):
+        return f"PostgreSQL service '{service_name}' configuration is invalid (expected a mapping)."
+
+    # Check fixed container name (Rule 12)
+    c_name = service_cfg.get("container_name")
+    if c_name:
+        return (
+            f"Unsupported configuration: Service '{service_name}' specifies fixed container_name '{c_name}'. "
+            "Docker container names are globally unique per host and prevent parallel environments from running."
+        )
+
+    # Check custom entrypoint (Rule 9)
+    entrypoint = service_cfg.get("entrypoint")
+    if entrypoint:
+        return (
+            f"Unsupported configuration: PostgreSQL service '{service_name}' defines a custom entrypoint "
+            f"({entrypoint!r}). Custom database initialization scripts cannot be safely verified or transformed."
+        )
+
+    # Verify PostgreSQL service image (Rule 10)
+    image = str(service_cfg.get("image") or "").strip()
+    if not image:
+        if "build" in service_cfg:
+            return (
+                f"Unsupported configuration: Service '{service_name}' is built from source (build: {service_cfg.get('build')}). "
+                "Only pre-built official PostgreSQL distribution images ('postgres') are supported."
+            )
+        return f"Unsupported configuration: Service '{service_name}' specifies neither an image nor a build."
+
+    repo = extract_image_repository(image)
+    if repo not in SUPPORTED_POSTGRES_REPOSITORIES:
+        if "postgis" in repo:
+            return (
+                f"Unsupported configuration: Service '{service_name}' uses PostGIS image '{image}'. "
+                "PostGIS variants are unverified and unsupported. Only official 'postgres' distribution images are supported."
+            )
+        if "timescale" in repo:
+            return (
+                f"Unsupported configuration: Service '{service_name}' uses TimescaleDB image '{image}'. "
+                "TimescaleDB variants are unverified and unsupported. Only official 'postgres' distribution images are supported."
+            )
+        if "crunchy" in repo:
+            return (
+                f"Unsupported configuration: Service '{service_name}' uses Crunchy Data image '{image}'. "
+                "Crunchy Data variants are unverified and unsupported. Only official 'postgres' distribution images are supported."
+            )
+        if "postgres" in repo:
+            return (
+                f"Unsupported configuration: Service '{service_name}' uses custom or unofficial PostgreSQL image '{image}'. "
+                "Only official 'postgres' distribution images are supported."
+            )
+        return (
+            f"Unsupported configuration: Service '{service_name}' uses image '{image}', which is not "
+            "recognized as the official PostgreSQL distribution image ('postgres')."
+        )
+
+    return None
+
+
 class ValidatedConfig(NamedTuple):
     raw_compose: dict[str, Any]
     app_port: int
@@ -233,24 +341,9 @@ def validate_spec_and_config(spec: CreateSpec) -> ValidatedConfig:
         )
 
     db_cfg = services[spec.db_service]
-    if not isinstance(db_cfg, dict):
-        raise ValidationError(f"PostgreSQL service '{spec.db_service}' configuration is invalid.")
-
-    # 9. Refuse custom database entrypoints
-    entrypoint = db_cfg.get("entrypoint")
-    if entrypoint:
-        raise ValidationError(
-            f"Unsupported configuration: PostgreSQL service '{spec.db_service}' defines a custom entrypoint "
-            f"({entrypoint!r}). Custom database initialization scripts cannot be safely verified or transformed."
-        )
-
-    # 10. Verify PostgreSQL service image
-    db_image = str(db_cfg.get("image") or "").lower()
-    if db_image and not any(tag in db_image for tag in ("postgres", "postgis", "timescaledb", "crunchy")):
-        raise ValidationError(
-            f"Unsupported configuration: Service '{spec.db_service}' uses image '{db_image}', which is not "
-            "recognized as a PostgreSQL service. This milestone only supports PostgreSQL."
-        )
+    db_err = validate_postgres_service_definition(spec.db_service, db_cfg)
+    if db_err:
+        raise ValidationError(db_err)
 
     # 11. Refuse external storage drivers / external volumes
     top_volumes = raw_compose.get("volumes") or {}
